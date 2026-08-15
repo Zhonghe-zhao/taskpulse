@@ -21,10 +21,19 @@ spec:
           env:
             - name: TASKPULSE_URL
               value: http://taskpulse:8080
+            - name: TASKPULSE_WORKER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: TASKPULSE_WORKER_AUTH_TOKEN
             - name: TASKPULSE_EXTERNAL_LEASE
               value: 30s
             - name: TASKPULSE_EXTERNAL_POLL_INTERVAL
               value: 200ms
+            - name: TASKPULSE_EXTERNAL_CLAIM_RETRY_MAX_INTERVAL
+              value: 5s
+            - name: TASKPULSE_EXTERNAL_SHUTDOWN_TIMEOUT
+              value: 5s
             - name: TASKPULSE_EXTERNAL_WORKER_ID
               valueFrom:
                 fieldRef:

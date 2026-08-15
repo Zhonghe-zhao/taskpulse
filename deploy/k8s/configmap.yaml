@@ -62,3 +62,34 @@ data:
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
   000002_binary_idempotency_key.sql: |
     ALTER TABLE tasks MODIFY idempotency_key VARBINARY(128) NULL;
+  000003_workflow_idempotency.sql: |
+    ALTER TABLE tasks
+        DROP INDEX uk_tasks_idempotency_key,
+        ADD UNIQUE KEY uk_tasks_workflow_idempotency (workflow, idempotency_key);
+  000004_task_outbox.sql: |
+    CREATE TABLE task_outbox (
+        id VARCHAR(128) NOT NULL,
+        task_id VARCHAR(64) NOT NULL,
+        workflow VARCHAR(64) NOT NULL,
+        event_type VARCHAR(64) NOT NULL,
+        payload_json JSON NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+        attempts INT UNSIGNED NOT NULL DEFAULT 0,
+        available_at DATETIME(6) NOT NULL,
+        published_at DATETIME(6) NULL,
+        last_error TEXT NULL,
+        created_at DATETIME(6) NOT NULL,
+        updated_at DATETIME(6) NOT NULL,
+        PRIMARY KEY (id),
+        KEY idx_task_outbox_pending (status, available_at, created_at, id),
+        KEY idx_task_outbox_task (task_id),
+        CONSTRAINT fk_task_outbox_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+  000005_task_list_indexes.sql: |
+    ALTER TABLE tasks
+        ADD KEY idx_tasks_list_created (created_at, id),
+        ADD KEY idx_tasks_list_status_created (status, created_at, id),
+        ADD KEY idx_tasks_list_workflow_created (workflow, created_at, id);
+  000006_task_last_heartbeat.sql: |
+    ALTER TABLE tasks
+        ADD COLUMN last_heartbeat_at DATETIME(6) NULL AFTER lease_expires_at;

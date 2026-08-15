@@ -46,6 +46,11 @@ spec:
                 secretKeyRef:
                   name: mysql-secret
                   key: MYSQL_PASSWORD
+            - name: TASKPULSE_WORKER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: TASKPULSE_WORKER_AUTH_TOKEN
           readinessProbe:
             httpGet:
               path: /metrics

@@ -22,3 +22,5 @@ Thumbs.db
 # Runtime data
 tmp/
 logs/
+artifacts/
+*.tar

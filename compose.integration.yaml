@@ -1,0 +1,144 @@
+name: taskpulse-integration
+
+services:
+  mysql:
+    image: mysql:8.4.10
+    environment:
+      MYSQL_DATABASE: ${TASKPULSE_MYSQL_DATABASE:-taskpulse}
+      MYSQL_USER: ${TASKPULSE_MYSQL_USER:-taskpulse}
+      MYSQL_PASSWORD: ${TASKPULSE_MYSQL_PASSWORD:-taskpulse_dev}
+      MYSQL_ROOT_PASSWORD: ${TASKPULSE_MYSQL_ROOT_PASSWORD:-taskpulse_root_dev}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    volumes:
+      - taskpulse_integration_mysql_data:/var/lib/mysql
+      - ./migrations/000001_init.up.sql:/docker-entrypoint-initdb.d/000001_init.sql:ro
+      - ./migrations/000002_binary_idempotency_key.up.sql:/docker-entrypoint-initdb.d/000002_binary_idempotency_key.sql:ro
+      - ./migrations/000003_workflow_idempotency.up.sql:/docker-entrypoint-initdb.d/000003_workflow_idempotency.sql:ro
+      - ./migrations/000004_task_outbox.up.sql:/docker-entrypoint-initdb.d/000004_task_outbox.sql:ro
+      - ./migrations/000005_task_list_indexes.up.sql:/docker-entrypoint-initdb.d/000005_task_list_indexes.sql:ro
+      - ./migrations/000006_task_last_heartbeat.up.sql:/docker-entrypoint-initdb.d/000006_task_last_heartbeat.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+
+  postgres:
+    # MemoBridge migrations create pgvector tables; stock postgres:15-alpine
+    # does not ship the vector extension.
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_USER: ${MEMOBRIDGE_POSTGRES_USER:-memobridge}
+      POSTGRES_PASSWORD: ${MEMOBRIDGE_POSTGRES_PASSWORD:-memobridge_local}
+      POSTGRES_DB: ${MEMOBRIDGE_POSTGRES_DB:-memobridge}
+    volumes:
+      - memobridge_integration_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  taskpulse:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP: taskpulse
+    environment:
+      TASKPULSE_STORAGE: mysql
+      TASKPULSE_HTTP_ADDR: :8080
+      TASKPULSE_INTERNAL_WORKERS_ENABLED: "false"
+      TASKPULSE_WORKER_AUTH_TOKEN: ${TASKPULSE_WORKER_AUTH_TOKEN:-taskpulse_integration_worker_token}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${TASKPULSE_MYSQL_DATABASE:-taskpulse}
+      MYSQL_USER: ${TASKPULSE_MYSQL_USER:-taskpulse}
+      MYSQL_PASSWORD: ${TASKPULSE_MYSQL_PASSWORD:-taskpulse_dev}
+      MYSQL_CONNECT_TIMEOUT: 5s
+      MYSQL_READ_TIMEOUT: 10s
+      MYSQL_WRITE_TIMEOUT: 10s
+    ports:
+      - "${TASKPULSE_BIND_ADDRESS:-127.0.0.1}:${TASKPULSE_HTTP_PORT:-8085}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/metrics >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  memobridge-api:
+    build:
+      context: ../memobridge
+      dockerfile: Dockerfile.integration
+      additional_contexts:
+        taskpulse: ..
+    environment:
+      ADDR: :8080
+      DATABASE_URL: postgres://${MEMOBRIDGE_POSTGRES_USER:-memobridge}:${MEMOBRIDGE_POSTGRES_PASSWORD:-memobridge_local}@postgres:5432/${MEMOBRIDGE_POSTGRES_DB:-memobridge}?sslmode=disable
+      MEMOBRIDGE_RUN_MIGRATIONS: "true"
+      MEMOBRIDGE_SERVE_STATIC: "false"
+      MEMOBRIDGE_AI_PROVIDER: ${MEMOBRIDGE_AI_PROVIDER:-fake}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      TASKPULSE_URL: http://taskpulse:8080
+      TASKPULSE_WORKER_AUTH_TOKEN: ${TASKPULSE_WORKER_AUTH_TOKEN:-taskpulse_integration_worker_token}
+    ports:
+      - "${MEMOBRIDGE_BIND_ADDRESS:-127.0.0.1}:${MEMOBRIDGE_HTTP_PORT:-8081}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      taskpulse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  memobridge-worker:
+    restart: unless-stopped
+    build:
+      context: ../memobridge
+      dockerfile: Dockerfile.worker
+      additional_contexts:
+        taskpulse: ..
+    environment:
+      DATABASE_URL: postgres://${MEMOBRIDGE_POSTGRES_USER:-memobridge}:${MEMOBRIDGE_POSTGRES_PASSWORD:-memobridge_local}@postgres:5432/${MEMOBRIDGE_POSTGRES_DB:-memobridge}?sslmode=disable
+      TASKPULSE_URL: http://taskpulse:8080
+      TASKPULSE_WORKER_AUTH_TOKEN: ${TASKPULSE_WORKER_AUTH_TOKEN:-taskpulse_integration_worker_token}
+      TASKPULSE_WORKER_ID: ${TASKPULSE_WORKER_ID:-}
+      TASKPULSE_LEASE_DURATION: ${TASKPULSE_LEASE_DURATION:-30s}
+      TASKPULSE_POLL_INTERVAL: ${TASKPULSE_POLL_INTERVAL:-1s}
+      TASKPULSE_HEARTBEAT_INTERVAL: ${TASKPULSE_HEARTBEAT_INTERVAL:-10s}
+      TASKPULSE_EXECUTION_TIMEOUT: ${TASKPULSE_EXECUTION_TIMEOUT:-}
+      TASKPULSE_SHUTDOWN_TIMEOUT: ${TASKPULSE_SHUTDOWN_TIMEOUT:-5s}
+      # Optional test-only delay. Set it above the lease duration before
+      # deleting this Worker to demonstrate lease-expiration recovery.
+      MEMOBRIDGE_TASKPULSE_EXECUTION_DELAY: ${MEMOBRIDGE_TASKPULSE_EXECUTION_DELAY:-}
+      MEMOBRIDGE_AI_PROVIDER: ${MEMOBRIDGE_AI_PROVIDER:-fake}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      taskpulse:
+        condition: service_healthy
+      memobridge-api:
+        condition: service_healthy
+
+volumes:
+  taskpulse_integration_mysql_data:
+  memobridge_integration_postgres_data:

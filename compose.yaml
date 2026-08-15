@@ -10,7 +10,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-taskpulse_root_dev}
       TZ: UTC
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      - "${MYSQL_BIND_ADDRESS:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
@@ -21,6 +21,8 @@ services:
       - ./migrations/000002_binary_idempotency_key.up.sql:/docker-entrypoint-initdb.d/000002_binary_idempotency_key.sql:ro
       - ./migrations/000003_workflow_idempotency.up.sql:/docker-entrypoint-initdb.d/000003_workflow_idempotency.sql:ro
       - ./migrations/000004_task_outbox.up.sql:/docker-entrypoint-initdb.d/000004_task_outbox.sql:ro
+      - ./migrations/000005_task_list_indexes.up.sql:/docker-entrypoint-initdb.d/000005_task_list_indexes.sql:ro
+      - ./migrations/000006_task_last_heartbeat.up.sql:/docker-entrypoint-initdb.d/000006_task_last_heartbeat.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
       interval: 5s
@@ -38,6 +40,7 @@ services:
       TASKPULSE_STORAGE: mysql
       TASKPULSE_HTTP_ADDR: :8080
       TASKPULSE_INTERNAL_WORKERS_ENABLED: "false"
+      TASKPULSE_WORKER_AUTH_TOKEN: ${TASKPULSE_WORKER_AUTH_TOKEN:-taskpulse_dev_worker_token}
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
       MYSQL_DATABASE: ${MYSQL_DATABASE:-taskpulse}
@@ -47,7 +50,7 @@ services:
       MYSQL_READ_TIMEOUT: 10s
       MYSQL_WRITE_TIMEOUT: 10s
     ports:
-      - "${TASKPULSE_HTTP_PORT:-8085}:8080"
+      - "${TASKPULSE_BIND_ADDRESS:-127.0.0.1}:${TASKPULSE_HTTP_PORT:-8085}:8080"
     depends_on:
       mysql:
         condition: service_healthy
@@ -66,9 +69,14 @@ services:
         APP: llm-worker
     environment:
       TASKPULSE_URL: http://taskpulse:8080
-      TASKPULSE_EXTERNAL_WORKER_ID: ${TASKPULSE_EXTERNAL_WORKER_ID:-external-llm-worker-1}
+      TASKPULSE_WORKER_AUTH_TOKEN: ${TASKPULSE_WORKER_AUTH_TOKEN:-taskpulse_dev_worker_token}
+      # Leave empty by default so every scaled container derives a unique ID from its hostname.
+      TASKPULSE_EXTERNAL_WORKER_ID: ${TASKPULSE_EXTERNAL_WORKER_ID:-}
       TASKPULSE_EXTERNAL_LEASE: 30s
-      TASKPULSE_EXTERNAL_POLL_INTERVAL: 200ms
+      TASKPULSE_EXTERNAL_POLL_INTERVAL: ${TASKPULSE_EXTERNAL_POLL_INTERVAL:-200ms}
+      TASKPULSE_EXTERNAL_CLAIM_RETRY_MAX_INTERVAL: ${TASKPULSE_EXTERNAL_CLAIM_RETRY_MAX_INTERVAL:-5s}
+      TASKPULSE_EXTERNAL_EXECUTION_TIMEOUT: ${TASKPULSE_EXTERNAL_EXECUTION_TIMEOUT:-}
+      TASKPULSE_EXTERNAL_SHUTDOWN_TIMEOUT: ${TASKPULSE_EXTERNAL_SHUTDOWN_TIMEOUT:-5s}
       TASKPULSE_LLM_FAKE_FAILURE: ${TASKPULSE_LLM_FAKE_FAILURE:-}
       TASKPULSE_LLM_FAKE_DELAY: ${TASKPULSE_LLM_FAKE_DELAY:-}
     depends_on:
