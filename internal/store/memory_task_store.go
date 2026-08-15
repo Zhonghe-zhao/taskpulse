@@ -176,6 +176,7 @@ func (s *MemoryTaskStore) claimNextLocked(
 	leaseExpiresAt := options.Now.Add(options.LeaseDuration)
 	selected.LeaseOwner = options.WorkerID
 	selected.LeaseExpiresAt = &leaseExpiresAt
+	selected.LastHeartbeatAt = nil
 	selected.Version++
 
 	return cloneTask(selected), previous, claimKind, nil
@@ -203,6 +204,8 @@ func (s *MemoryTaskStore) RenewLease(ctx context.Context, options RenewLeaseOpti
 
 	leaseExpiresAt := options.Now.Add(options.LeaseDuration)
 	task.LeaseExpiresAt = &leaseExpiresAt
+	heartbeatAt := options.Now
+	task.LastHeartbeatAt = &heartbeatAt
 	task.UpdatedAt = options.Now
 	return nil
 }
@@ -270,6 +273,10 @@ func cloneTask(task *domain.Task) *domain.Task {
 	if task.LeaseExpiresAt != nil {
 		leaseExpiresAt := *task.LeaseExpiresAt
 		copied.LeaseExpiresAt = &leaseExpiresAt
+	}
+	if task.LastHeartbeatAt != nil {
+		lastHeartbeatAt := *task.LastHeartbeatAt
+		copied.LastHeartbeatAt = &lastHeartbeatAt
 	}
 
 	return &copied

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -58,5 +59,31 @@ func TestMemoryTaskStoreSnapshotsTaskStats(t *testing.T) {
 	}
 	if snapshot.OldestAvailableAge[domain.TaskStatusQueued] != 2*time.Minute {
 		t.Fatalf("unexpected oldest queued age: %+v", snapshot.OldestAvailableAge)
+	}
+}
+
+func TestMemoryTaskStoreSnapshotsFilteredTaskStats(t *testing.T) {
+	ctx := context.Background()
+	taskStore := NewMemoryTaskStore()
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	for index, workflow := range []string{"llm_analysis", "memobridge.semantic_profile", "memobridge.semantic_profile"} {
+		task, err := domain.NewTask(fmt.Sprintf("task_%d", index), workflow, nil, 3, now)
+		if err != nil {
+			t.Fatalf("NewTask returned error: %v", err)
+		}
+		if err := taskStore.Create(ctx, task); err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+	}
+
+	snapshot, err := taskStore.SnapshotFilteredTaskStats(ctx, now, TaskStatsFilter{
+		Workflow: "memobridge.semantic_profile",
+		Status:   domain.TaskStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("SnapshotFilteredTaskStats returned error: %v", err)
+	}
+	if snapshot.StatusCounts[domain.TaskStatusQueued] != 2 {
+		t.Fatalf("expected 2 filtered queued tasks, got %+v", snapshot.StatusCounts)
 	}
 }

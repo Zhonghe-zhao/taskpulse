@@ -1,12 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,32 +15,60 @@ import (
 	"github.com/zhaozhonghe/taskpulse/internal/domain"
 	"github.com/zhaozhonghe/taskpulse/internal/executor/llmanalysis"
 	"github.com/zhaozhonghe/taskpulse/internal/worker"
+	"github.com/zhaozhonghe/taskpulse/pkg/taskpulse"
+	"github.com/zhaozhonghe/taskpulse/pkg/taskpulseworker"
 )
 
 type config struct {
-	TaskPulseURL string
-	WorkerID     string
-	Workflow     string
-	Lease        time.Duration
-	PollInterval time.Duration
-	HTTPClient   *http.Client
+	TaskPulseURL          string
+	WorkerID              string
+	Workflow              string
+	Lease                 time.Duration
+	PollInterval          time.Duration
+	ClaimRetryMaxInterval time.Duration
+	HeartbeatInterval     time.Duration
+	ExecutionTimeout      time.Duration
+	ShutdownTimeout       time.Duration
 }
 
-type workerClient struct {
-	baseURL string
-	worker  string
-	workflow string
-	lease   time.Duration
-	client  *http.Client
+type llmExecutorAdapter struct {
+	executor worker.Executor
 }
 
-type apiError struct {
-	status int
-	body   string
-}
-
-func (e *apiError) Error() string {
-	return fmt.Sprintf("taskpulse returned status %d: %s", e.status, e.body)
+func (a llmExecutorAdapter) Execute(
+	ctx context.Context,
+	task *taskpulse.Task,
+	progress taskpulseworker.ProgressReporter,
+) (taskpulseworker.Result, error) {
+	internalTask := &domain.Task{
+		ID:         task.ID,
+		Workflow:   task.Workflow,
+		Status:     domain.TaskStatus(task.Status),
+		Input:      task.Input,
+		RetryCount: task.RetryCount,
+		MaxRetries: task.MaxRetries,
+		Version:    task.Version,
+	}
+	if err := progress.Report(ctx, 10, "preparing task"); err != nil {
+		return taskpulseworker.Result{}, err
+	}
+	result, err := a.executor.Execute(ctx, internalTask)
+	if err != nil {
+		if classified, ok := worker.AsExecutionError(err); ok {
+			if classified.Retryable() {
+				return taskpulseworker.Result{}, &taskpulseworker.Failure{
+					Code: classified.Code, Message: classified.Error(), Retryable: true,
+					RetryAfter: classified.RetryAfter, Err: err,
+				}
+			}
+			return taskpulseworker.Result{}, taskpulseworker.Permanent(classified.Code, classified.Error(), err)
+		}
+		return taskpulseworker.Result{}, err
+	}
+	if err := progress.Report(ctx, 90, "validating result"); err != nil {
+		return taskpulseworker.Result{}, err
+	}
+	return taskpulseworker.Result{Output: result.Output}, nil
 }
 
 func main() {
@@ -76,260 +101,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := &workerClient{
-		baseURL: cfg.TaskPulseURL,
-		worker:  cfg.WorkerID,
-		workflow: cfg.Workflow,
-		lease:   cfg.Lease,
-		client:  cfg.HTTPClient,
+	runtime, err := taskpulseworker.New(taskpulseworker.Config{
+		Client:                &taskpulse.Client{BaseURL: cfg.TaskPulseURL, HTTPClient: &http.Client{Timeout: 10 * time.Second}},
+		WorkerID:              cfg.WorkerID,
+		Workflow:              cfg.Workflow,
+		LeaseDuration:         cfg.Lease,
+		PollInterval:          cfg.PollInterval,
+		ClaimRetryMaxInterval: cfg.ClaimRetryMaxInterval,
+		HeartbeatInterval:     cfg.HeartbeatInterval,
+		ExecutionTimeout:      cfg.ExecutionTimeout,
+		ShutdownTimeout:       cfg.ShutdownTimeout,
+		Logger:                logger,
+	})
+	if err != nil {
+		logger.Error("initialize taskpulse runtime", "error", err)
+		os.Exit(1)
 	}
+	if err := runtime.Register(cfg.Workflow, llmExecutorAdapter{executor: executor}); err != nil {
+		logger.Error("register llm executor", "error", err)
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	logger.Info("external llm worker started", "worker_id", cfg.WorkerID, "taskpulse_url", cfg.TaskPulseURL)
-
-	for {
-		processed, err := processNext(ctx, client, executor, logger)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-			logger.Error("external worker iteration failed", "error", err)
-		}
-		if processed {
-			continue
-		}
-		timer := time.NewTimer(cfg.PollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
+	logger.Info("external llm worker started", "worker_id", cfg.WorkerID, "workflow", cfg.Workflow, "taskpulse_url", cfg.TaskPulseURL)
+	if err := runtime.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Error("external worker stopped with error", "error", err)
+		os.Exit(1)
 	}
-}
-
-func processNext(
-	ctx context.Context,
-	client *workerClient,
-	executor worker.Executor,
-	logger *slog.Logger,
-) (bool, error) {
-	task, err := client.claim(ctx)
-	if errors.Is(err, errNoTaskAvailable) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	logger.Info("external task claimed", "task_id", task.ID, "workflow", task.Workflow, "version", task.Version)
-	if _, err := client.reportProgress(ctx, task, 10, "preparing task"); err != nil {
-		if isConflict(err) {
-			logger.Warn("external task progress rejected", "task_id", task.ID, "error", err)
-			return true, nil
-		}
-		return true, err
-	}
-	logger.Debug("external task progress reported", "task_id", task.ID, "progress", 10)
-
-	result, executeErr := executeWithHeartbeat(ctx, client, executor, task)
-	if executeErr != nil {
-		// Pod termination, lease loss, and explicit shutdown cancel the execution
-		// context. The task must be recovered by TaskPulse, not reported as a
-		// business failure by a worker that is already stopping.
-		if errors.Is(executeErr, context.Canceled) {
-			logger.Warn("external task execution canceled", "task_id", task.ID, "error", executeErr)
-			return true, nil
-		}
-		code := "external_worker_error"
-		retryable := true
-		retryAfter := time.Duration(0)
-		if classified, ok := worker.AsExecutionError(executeErr); ok {
-			code = classified.Code
-			retryable = classified.Retryable()
-			retryAfter = classified.RetryAfter
-		}
-		if err := client.fail(ctx, task, code, executeErr.Error(), retryable, retryAfter); err != nil {
-			if isConflict(err) {
-				logger.Warn("external task result rejected", "task_id", task.ID, "error", err)
-				return true, nil
-			}
-			return true, err
-		}
-		logger.Warn("external task failed", "task_id", task.ID, "error_code", code, "error", executeErr)
-		return true, nil
-	}
-	progressed, err := client.reportProgress(ctx, task, 90, "validating result")
-	if err != nil {
-		if isConflict(err) {
-			logger.Warn("external task progress rejected", "task_id", task.ID, "error", err)
-			return true, nil
-		}
-		return true, err
-	}
-	task.Version = progressed.Version
-	if err := client.complete(ctx, task, result.Output); err != nil {
-		if isConflict(err) {
-			logger.Warn("external task result rejected", "task_id", task.ID, "error", err)
-			return true, nil
-		}
-		return true, err
-	}
-	logger.Info("external task completed", "task_id", task.ID)
-	return true, nil
-}
-
-func executeWithHeartbeat(
-	ctx context.Context,
-	client *workerClient,
-	executor worker.Executor,
-	task *domain.Task,
-) (worker.ExecutionResult, error) {
-	executionCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	heartbeatResult := make(chan error, 1)
-	go client.heartbeatLoop(executionCtx, cancel, task, heartbeatResult)
-
-	result, executeErr := executor.Execute(executionCtx, task)
-	cancel()
-	heartbeatErr := <-heartbeatResult
-	// A successful executor result wins over context cancellation caused by
-	// stopping the heartbeat loop. The cancellation is our own shutdown signal.
-	if executeErr == nil {
-		return result, nil
-	}
-	if heartbeatErr != nil && !errors.Is(heartbeatErr, context.Canceled) {
-		return worker.ExecutionResult{}, heartbeatErr
-	}
-	return result, executeErr
-}
-
-func (c *workerClient) claim(ctx context.Context) (*domain.Task, error) {
-	var task domain.Task
-	status, err := c.post(ctx, "/worker/tasks/claim", map[string]string{
-		"worker_id":      c.worker,
-		"workflow":       c.workflow,
-		"lease_duration": c.lease.String(),
-	}, &task)
-	if err != nil {
-		return nil, err
-	}
-	if status == http.StatusNoContent {
-		return nil, errNoTaskAvailable
-	}
-	return &task, nil
-}
-
-func (c *workerClient) heartbeatLoop(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	task *domain.Task,
-	result chan<- error,
-) {
-	ticker := time.NewTicker(c.lease / 3)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			result <- nil
-			return
-		case <-ticker.C:
-			var renewed domain.Task
-			_, err := c.post(ctx, "/worker/tasks/"+task.ID+"/heartbeat", map[string]string{
-				"worker_id":      c.worker,
-				"lease_duration": c.lease.String(),
-			}, &renewed)
-			if err != nil {
-				cancel()
-				result <- err
-				return
-			}
-		}
-	}
-}
-
-func (c *workerClient) complete(ctx context.Context, task *domain.Task, output json.RawMessage) error {
-	_, err := c.post(ctx, "/worker/tasks/"+task.ID+"/complete", map[string]any{
-		"worker_id": c.worker,
-		"version":   task.Version,
-		"output":    output,
-	}, nil)
-	return err
-}
-
-func (c *workerClient) reportProgress(
-	ctx context.Context,
-	task *domain.Task,
-	progress int,
-	message string,
-) (*domain.Task, error) {
-	var updated domain.Task
-	_, err := c.post(ctx, "/worker/tasks/"+task.ID+"/progress", map[string]any{
-		"worker_id": c.worker,
-		"version":   task.Version,
-		"progress":  progress,
-		"message":   message,
-	}, &updated)
-	if err != nil {
-		return nil, err
-	}
-	task.Version = updated.Version
-	return &updated, nil
-}
-
-func (c *workerClient) fail(
-	ctx context.Context,
-	task *domain.Task,
-	code string,
-	message string,
-	retryable bool,
-	retryAfter time.Duration,
-) error {
-	_, err := c.post(ctx, "/worker/tasks/"+task.ID+"/fail", map[string]any{
-		"worker_id":     c.worker,
-		"version":       task.Version,
-		"error_code":    code,
-		"error_message": message,
-		"retryable":     retryable,
-		"retry_after":   retryAfter.String(),
-	}, nil)
-	return err
-}
-
-func (c *workerClient) post(ctx context.Context, path string, body any, response any) (int, error) {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return 0, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNoContent {
-		return resp.StatusCode, nil
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return resp.StatusCode, &apiError{status: resp.StatusCode, body: strings.TrimSpace(string(data))}
-	}
-	if response != nil {
-		if err := json.NewDecoder(resp.Body).Decode(response); err != nil {
-			return resp.StatusCode, err
-		}
-	}
-	return resp.StatusCode, nil
-}
-
-var errNoTaskAvailable = errors.New("no task available")
-
-func isConflict(err error) bool {
-	var apiErr *apiError
-	return errors.As(err, &apiErr) && apiErr.status == http.StatusConflict
+	logger.Info("external llm worker stopped", "worker_id", cfg.WorkerID)
 }
 
 func loadConfig() (config, error) {
@@ -341,18 +141,45 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	claimRetryMaxInterval, err := parseDurationEnv("TASKPULSE_EXTERNAL_CLAIM_RETRY_MAX_INTERVAL", 5*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+	heartbeat, err := parseDurationEnv("TASKPULSE_EXTERNAL_HEARTBEAT_INTERVAL", lease/3)
+	if err != nil {
+		return config{}, err
+	}
+	executionTimeout, err := parseOptionalDurationEnv("TASKPULSE_EXTERNAL_EXECUTION_TIMEOUT")
+	if err != nil {
+		return config{}, err
+	}
+	shutdownTimeout, err := parseDurationEnv("TASKPULSE_EXTERNAL_SHUTDOWN_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return config{}, err
+	}
 	workerID := os.Getenv("TASKPULSE_EXTERNAL_WORKER_ID")
 	if workerID == "" {
-		workerID = "external-llm-worker"
+		workerID = defaultWorkerID()
 	}
 	return config{
-		TaskPulseURL: strings.TrimRight(defaultEnv("TASKPULSE_URL", "http://localhost:8080"), "/"),
-		WorkerID:     workerID,
-		Workflow:     defaultEnv("TASKPULSE_WORKER_WORKFLOW", "llm_analysis"),
-		Lease:        lease,
-		PollInterval: poll,
-		HTTPClient:   &http.Client{Timeout: 10 * time.Second},
+		TaskPulseURL:          strings.TrimRight(defaultEnv("TASKPULSE_URL", "http://localhost:8080"), "/"),
+		WorkerID:              workerID,
+		Workflow:              defaultEnv("TASKPULSE_WORKER_WORKFLOW", "llm_analysis"),
+		Lease:                 lease,
+		PollInterval:          poll,
+		ClaimRetryMaxInterval: claimRetryMaxInterval,
+		HeartbeatInterval:     heartbeat,
+		ExecutionTimeout:      executionTimeout,
+		ShutdownTimeout:       shutdownTimeout,
 	}, nil
+}
+
+func defaultWorkerID() string {
+	hostname, err := os.Hostname()
+	if err == nil && hostname != "" {
+		return "external-llm-worker-" + hostname
+	}
+	return "external-llm-worker"
 }
 
 func parseDurationEnv(name string, fallback time.Duration) (time.Duration, error) {
@@ -363,6 +190,18 @@ func parseDurationEnv(name string, fallback time.Duration) (time.Duration, error
 	duration, err := time.ParseDuration(raw)
 	if err != nil || duration <= 0 {
 		return 0, fmt.Errorf("%s must be a positive duration", name)
+	}
+	return duration, nil
+}
+
+func parseOptionalDurationEnv(name string) (time.Duration, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration when set", name)
 	}
 	return duration, nil
 }

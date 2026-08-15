@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +52,78 @@ func TestTaskServiceCreateTask(t *testing.T) {
 	}
 	if events[0].Type != domain.EventTaskCreated {
 		t.Fatalf("expected event type %s, got %s", domain.EventTaskCreated, events[0].Type)
+	}
+}
+
+func TestTaskServiceListsTasksWithOpaqueCursor(t *testing.T) {
+	ctx := context.Background()
+	service := newMemoryTaskService()
+	for range 3 {
+		if _, err := service.CreateTask(ctx, CreateTaskInput{Workflow: "llm_analysis"}); err != nil {
+			t.Fatalf("CreateTask returned error: %v", err)
+		}
+	}
+
+	first, err := service.ListTasks(ctx, ListTasksInput{Workflow: "llm_analysis", Limit: 2})
+	if err != nil {
+		t.Fatalf("ListTasks returned error: %v", err)
+	}
+	if len(first.Items) != 2 || !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("unexpected first page: %+v", first)
+	}
+	second, err := service.ListTasks(ctx, ListTasksInput{
+		Workflow: "llm_analysis",
+		Cursor:   first.NextCursor,
+		Limit:    2,
+	})
+	if err != nil {
+		t.Fatalf("ListTasks second page returned error: %v", err)
+	}
+	if len(second.Items) != 1 || second.HasMore {
+		t.Fatalf("unexpected second page: %+v", second)
+	}
+}
+
+func TestTaskServiceDetailDerivesFailureDiagnosticsWithoutLeaseToken(t *testing.T) {
+	ctx := context.Background()
+	taskStore := store.NewMemoryTaskStore()
+	eventStore := store.NewMemoryEventStore()
+	creationStore := store.NewMemoryTaskCreationStore(taskStore, eventStore)
+	transitionStore := store.NewMemoryTaskTransitionStore(taskStore, eventStore)
+	service := NewTaskService(taskStore, eventStore, creationStore, transitionStore)
+	created, err := service.CreateTask(ctx, CreateTaskInput{Workflow: "memobridge.semantic_profile"})
+	if err != nil {
+		t.Fatalf("CreateTask returned error: %v", err)
+	}
+	event, err := domain.NewTaskEvent(
+		"event_failed",
+		created.Task.ID,
+		domain.EventTaskFailed,
+		"invalid output",
+		json.RawMessage(`{"error_code":"invalid_model_output","retryable":false}`),
+		0,
+		created.Task.CreatedAt.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewTaskEvent returned error: %v", err)
+	}
+	if err := eventStore.Append(ctx, event); err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
+	detail, err := service.GetTaskDetail(ctx, created.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTaskDetail returned error: %v", err)
+	}
+	if detail.ErrorCode != "invalid_model_output" || detail.Retryable == nil || *detail.Retryable {
+		t.Fatalf("unexpected failure diagnostics: %+v", detail)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	if strings.Contains(string(encoded), "lease_token") {
+		t.Fatalf("task detail leaked lease token: %s", encoded)
 	}
 }
 

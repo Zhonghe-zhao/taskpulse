@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,9 +61,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("initialize external retry scheduler: %v", err)
 	}
-	workerTaskService.WithRetryScheduler(externalRetryScheduler)
+	workerTaskService.WithRetryScheduler(externalRetryScheduler).WithMetrics(metrics)
+	workerAuthToken := strings.TrimSpace(os.Getenv("TASKPULSE_WORKER_AUTH_TOKEN"))
+	if workerAuthToken == "" && os.Getenv("TASKPULSE_INSECURE_ALLOW_UNAUTHENTICATED_WORKERS") != "true" {
+		log.Fatal("TASKPULSE_WORKER_AUTH_TOKEN is required; set TASKPULSE_INSECURE_ALLOW_UNAUTHENTICATED_WORKERS=true only for isolated local development")
+	}
 	router := httptransport.NewRouter(
-		httptransport.NewHandlerWithWorker(taskService, workerTaskService),
+		httptransport.NewHandlerWithWorker(taskService, workerTaskService).WithWorkerAuthToken(workerAuthToken).WithClaimMetrics(metrics),
 		metrics,
 	)
 

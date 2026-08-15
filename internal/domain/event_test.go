@@ -123,6 +123,27 @@ func TestNewTaskCanceledEvent(t *testing.T) {
 	}
 }
 
+func TestNewTaskReleasedEvent(t *testing.T) {
+	now := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	task, err := NewTask("task_1", "llm_analysis", nil, 3, now)
+	if err != nil {
+		t.Fatalf("NewTask returned error: %v", err)
+	}
+	if err := task.MoveTo(TaskStatusRunning, now); err != nil {
+		t.Fatalf("MoveTo running returned error: %v", err)
+	}
+	if err := task.RequeueForRelease(now.Add(time.Second)); err != nil {
+		t.Fatalf("RequeueForRelease returned error: %v", err)
+	}
+	event, err := NewTaskReleasedEvent("event_1", task, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("NewTaskReleasedEvent returned error: %v", err)
+	}
+	if event.Type != EventTaskReleased || event.Message != "task released by worker during graceful shutdown" {
+		t.Fatalf("unexpected release event: %+v", event)
+	}
+}
+
 func TestNewTaskRetryingEvent(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	task, err := NewTask("task_1", "llm_analysis", nil, 3, now)

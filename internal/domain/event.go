@@ -14,6 +14,7 @@ const (
 	EventTaskRetryStarted EventType = "task_retry_started"
 	EventTaskRecovered    EventType = "task_recovered"
 	EventTaskRetrying     EventType = "task_retrying"
+	EventTaskReleased     EventType = "task_released"
 	EventTaskProgress     EventType = "task_progress"
 	EventTaskSucceeded    EventType = "task_succeeded"
 	EventTaskPartial      EventType = "task_partially_succeeded"
@@ -84,12 +85,24 @@ func NewTaskClaimedEvent(id string, task *Task, claimKind ClaimKind, now time.Ti
 		return nil, errors.New("invalid task claim kind")
 	}
 
+	payload, err := json.Marshal(struct {
+		WorkerID   string     `json:"worker_id"`
+		LeaseUntil *time.Time `json:"lease_until,omitempty"`
+		RetryCount int        `json:"retry_count"`
+	}{
+		WorkerID:   task.LeaseOwner,
+		LeaseUntil: task.LeaseExpiresAt,
+		RetryCount: task.RetryCount,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return NewTaskEvent(
 		id,
 		task.ID,
 		eventType,
 		message,
-		json.RawMessage("{}"),
+		payload,
 		task.Progress,
 		now,
 	)
@@ -106,6 +119,24 @@ func NewTaskExpiredEvent(id string, task *Task, now time.Time) (*TaskEvent, erro
 		EventTaskFailed,
 		"task failed after lease expiration",
 		json.RawMessage(`{"reason":"retry_budget_exhausted"}`),
+		task.Progress,
+		now,
+	)
+}
+
+func NewTaskReleasedEvent(id string, task *Task, now time.Time) (*TaskEvent, error) {
+	if task == nil {
+		return nil, errors.New("task is nil")
+	}
+	if task.Status != TaskStatusQueued {
+		return nil, errors.New("task is not queued after release")
+	}
+	return NewTaskEvent(
+		id,
+		task.ID,
+		EventTaskReleased,
+		"task released by worker during graceful shutdown",
+		json.RawMessage(`{"reason":"worker_shutdown"}`),
 		task.Progress,
 		now,
 	)

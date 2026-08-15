@@ -10,6 +10,12 @@
 `000002_binary_idempotency_key.up.sql` 将 `idempotency_key` 改为
 `VARBINARY(128)`，使 MySQL 与内存实现都按照原始字节精确比较幂等键。
 
+`000005_task_list_indexes.up.sql` 为运维控制台的任务时间线、状态筛选和
+Workflow 筛选增加倒序分页索引。
+
+`000006_task_last_heartbeat.up.sql` 独立记录 Worker 最近一次成功 Heartbeat，
+避免用包含进度更新和状态迁移的 `updated_at` 冒充心跳时间。
+
 `000001_init.down.sql` 按外键依赖的逆序删除表。
 
 ## 本地初始化

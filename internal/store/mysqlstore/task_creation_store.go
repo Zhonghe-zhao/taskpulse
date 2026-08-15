@@ -3,7 +3,6 @@ package mysqlstore
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -62,9 +61,6 @@ func (s *MySQLTaskCreationStore) CreateTaskWithEvent(
 	if err := insertEvent(ctx, tx, event); err != nil {
 		return nil, err
 	}
-	if err := insertTaskOutbox(ctx, tx, task); err != nil {
-		return nil, err
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit task %q creation: %w", task.ID, err)
 	}
@@ -72,36 +68,6 @@ func (s *MySQLTaskCreationStore) CreateTaskWithEvent(
 		Task:    task,
 		Created: true,
 	}, nil
-}
-
-func insertTaskOutbox(ctx context.Context, tx *sql.Tx, task *domain.Task) error {
-	payload, err := json.Marshal(struct {
-		TaskID   string `json:"task_id"`
-		Workflow string `json:"workflow"`
-	}{TaskID: task.ID, Workflow: task.Workflow})
-	if err != nil {
-		return fmt.Errorf("marshal task %q outbox payload: %w", task.ID, err)
-	}
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO task_outbox (
-    id, task_id, workflow, event_type, payload_json, status,
-    attempts, available_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		task.ID+":created",
-		task.ID,
-		task.Workflow,
-		"task_ready",
-		payload,
-		"pending",
-		0,
-		task.AvailableAt,
-		task.CreatedAt,
-		task.UpdatedAt,
-	)
-	if err != nil {
-		return fmt.Errorf("insert task %q outbox record: %w", task.ID, err)
-	}
-	return nil
 }
 
 func (s *MySQLTaskCreationStore) resolveIdempotentReplay(

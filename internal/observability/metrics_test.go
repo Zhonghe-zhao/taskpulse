@@ -27,7 +27,11 @@ func TestMetricsServePrometheusText(t *testing.T) {
 	snapshot.OldestAvailableAge[domain.TaskStatusQueued] = 30 * time.Second
 
 	metrics := NewMetrics().WithTaskStatsStore(fakeTaskStatsStore{snapshot: snapshot})
+	metrics.RecordClaimAttempt("llm_analysis")
+	metrics.RecordClaimAttempt("llm_analysis")
+	metrics.RecordClaimMiss("llm_analysis")
 	metrics.RecordTaskClaimed("llm_analysis")
+	metrics.RecordTaskReleased("llm_analysis")
 	metrics.RecordTaskRetried("llm_analysis", "llm_rate_limited")
 	metrics.RecordTaskCompleted("llm_analysis", domain.TaskStatusSucceeded, 150*time.Millisecond)
 
@@ -36,7 +40,10 @@ func TestMetricsServePrometheusText(t *testing.T) {
 	body := response.Body.String()
 
 	for _, want := range []string{
+		`taskpulse_claim_attempts_total{workflow="llm_analysis"} 2`,
+		`taskpulse_claim_misses_total{workflow="llm_analysis"} 1`,
 		`taskpulse_tasks_claimed_total{workflow="llm_analysis"} 1`,
+		`taskpulse_tasks_released_total{workflow="llm_analysis"} 1`,
 		`taskpulse_tasks_retried_total{workflow="llm_analysis",error_code="llm_rate_limited"} 1`,
 		`taskpulse_tasks_completed_total{workflow="llm_analysis",status="succeeded"} 1`,
 		`taskpulse_task_execution_duration_seconds_count{workflow="llm_analysis"} 1`,

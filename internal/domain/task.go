@@ -31,29 +31,30 @@ var (
 )
 
 type Task struct {
-	ID             string          `json:"id"`
-	IdempotencyKey string          `json:"idempotency_key,omitempty"`
-	Workflow       string          `json:"workflow"`
-	Status         TaskStatus      `json:"status"`
-	Input          json.RawMessage `json:"input"`
-	Result         json.RawMessage `json:"result,omitempty"`
-	ErrorMessage   string          `json:"error_message,omitempty"`
-	Progress       int             `json:"progress"`
-	RetryCount     int             `json:"retry_count"`
-	MaxRetries     int             `json:"max_retries"`
-	AvailableAt    time.Time       `json:"available_at"`
-	Version        uint64          `json:"version"`
-	LeaseOwner     string          `json:"lease_owner,omitempty"`
-	LeaseExpiresAt *time.Time      `json:"lease_expires_at,omitempty"`
+	ID              string          `json:"id"`
+	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
+	Workflow        string          `json:"workflow"`
+	Status          TaskStatus      `json:"status"`
+	Input           json.RawMessage `json:"input"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	ErrorMessage    string          `json:"error_message,omitempty"`
+	Progress        int             `json:"progress"`
+	RetryCount      int             `json:"retry_count"`
+	MaxRetries      int             `json:"max_retries"`
+	AvailableAt     time.Time       `json:"available_at"`
+	Version         uint64          `json:"version"`
+	LeaseOwner      string          `json:"lease_owner,omitempty"`
+	LeaseExpiresAt  *time.Time      `json:"lease_expires_at,omitempty"`
+	LastHeartbeatAt *time.Time      `json:"last_heartbeat_at,omitempty"`
 	// LeaseToken is an external protocol token derived when a task is claimed.
 	// The durable fencing state remains LeaseOwner, LeaseExpiresAt, and Version.
-	LeaseToken string          `json:"lease_token,omitempty"`
-	TaskID     string          `json:"task_id,omitempty"`
-	LeaseUntil *time.Time      `json:"lease_until,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	StartedAt      *time.Time      `json:"started_at,omitempty"`
-	FinishedAt     *time.Time      `json:"finished_at,omitempty"`
+	LeaseToken string     `json:"lease_token,omitempty"`
+	TaskID     string     `json:"task_id,omitempty"`
+	LeaseUntil *time.Time `json:"lease_until,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
 func NewTask(id, workflow string, input json.RawMessage, maxRetries int, now time.Time) (*Task, error) {
@@ -127,6 +128,29 @@ func (t *Task) ScheduleRetry(now, availableAt time.Time) error {
 
 	t.RetryCount++
 	t.AvailableAt = availableAt
+	return nil
+}
+
+// RequeueForRelease returns an actively running task to the queue without
+// consuming retry budget. It is used when a Worker is shutting down cleanly;
+// crash recovery remains the fallback when the Worker cannot report release.
+func (t *Task) RequeueForRelease(now time.Time) error {
+	if t == nil {
+		return errors.New("task is nil")
+	}
+	if t.Status != TaskStatusRunning {
+		return errors.New("only running tasks can be released")
+	}
+	if now.IsZero() {
+		return errors.New("release time is required")
+	}
+	t.Status = TaskStatusQueued
+	t.Progress = 0
+	t.ErrorMessage = ""
+	t.AvailableAt = now
+	t.LeaseOwner = ""
+	t.LeaseExpiresAt = nil
+	t.UpdatedAt = now
 	return nil
 }
 

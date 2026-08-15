@@ -11,6 +11,22 @@ type TaskStatsStore interface {
 	SnapshotTaskStats(ctx context.Context, now time.Time) (*TaskStatsSnapshot, error)
 }
 
+type TaskStatsFilter struct {
+	Workflow string
+	Status   domain.TaskStatus
+}
+
+func (f TaskStatsFilter) Validate() error {
+	if f.Status != "" && !isKnownTaskStatus(f.Status) {
+		return ErrInvalidTaskQuery
+	}
+	return nil
+}
+
+type FilteredTaskStatsStore interface {
+	SnapshotFilteredTaskStats(ctx context.Context, now time.Time, filter TaskStatsFilter) (*TaskStatsSnapshot, error)
+}
+
 type TaskStatsSnapshot struct {
 	StatusCounts       map[domain.TaskStatus]int
 	AvailableCounts    map[domain.TaskStatus]int
@@ -26,7 +42,18 @@ func NewTaskStatsSnapshot() *TaskStatsSnapshot {
 }
 
 func (s *MemoryTaskStore) SnapshotTaskStats(ctx context.Context, now time.Time) (*TaskStatsSnapshot, error) {
+	return s.SnapshotFilteredTaskStats(ctx, now, TaskStatsFilter{})
+}
+
+func (s *MemoryTaskStore) SnapshotFilteredTaskStats(
+	ctx context.Context,
+	now time.Time,
+	filter TaskStatsFilter,
+) (*TaskStatsSnapshot, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := filter.Validate(); err != nil {
 		return nil, err
 	}
 	if now.IsZero() {
@@ -38,6 +65,12 @@ func (s *MemoryTaskStore) SnapshotTaskStats(ctx context.Context, now time.Time) 
 
 	snapshot := NewTaskStatsSnapshot()
 	for _, task := range s.tasks {
+		if filter.Workflow != "" && task.Workflow != filter.Workflow {
+			continue
+		}
+		if filter.Status != "" && task.Status != filter.Status {
+			continue
+		}
 		snapshot.StatusCounts[task.Status]++
 		if isAvailableTask(task, now) {
 			snapshot.AvailableCounts[task.Status]++

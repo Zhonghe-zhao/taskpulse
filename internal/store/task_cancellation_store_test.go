@@ -179,7 +179,7 @@ func TestMemoryTaskCancellationStoreRollsBackWhenEventConflicts(t *testing.T) {
 	}
 }
 
-func TestMemoryTaskCancellationAndClaimCannotBothSucceed(t *testing.T) {
+func TestMemoryTaskCancellationWinsAgainstConcurrentClaim(t *testing.T) {
 	ctx := context.Background()
 	taskStore := NewMemoryTaskStore()
 	eventStore := NewMemoryEventStore()
@@ -233,14 +233,14 @@ func TestMemoryTaskCancellationAndClaimCannotBothSucceed(t *testing.T) {
 			t.Fatalf("unexpected concurrent transition error: %v", err)
 		}
 	}
-	if successes != 1 {
-		t.Fatalf("expected exactly one successful transition, got %d", successes)
+	if successes < 1 || successes > 2 {
+		t.Fatalf("expected cancellation alone or claim followed by cancellation, got %d successes", successes)
 	}
 	stored, err := taskStore.Get(ctx, task.ID)
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}
-	if stored.Status != domain.TaskStatusRunning && stored.Status != domain.TaskStatusCanceled {
-		t.Fatalf("unexpected final task state: %+v", stored)
+	if stored.Status != domain.TaskStatusCanceled {
+		t.Fatalf("cancellation must win the concurrent transition, got %+v", stored)
 	}
 }

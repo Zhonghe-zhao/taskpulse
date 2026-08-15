@@ -28,7 +28,10 @@ type Metrics struct {
 	mu sync.Mutex
 
 	taskStatsStore  store.TaskStatsStore
+	claimAttempts   map[string]uint64
+	claimMisses     map[string]uint64
 	tasksClaimed    map[string]uint64
+	tasksReleased   map[string]uint64
 	tasksCompleted  map[completionKey]uint64
 	tasksRetried    map[retryKey]uint64
 	leaseRenewed    map[string]uint64
@@ -56,7 +59,10 @@ type histogram struct {
 
 func NewMetrics() *Metrics {
 	return &Metrics{
+		claimAttempts:   make(map[string]uint64),
+		claimMisses:     make(map[string]uint64),
 		tasksClaimed:    make(map[string]uint64),
+		tasksReleased:   make(map[string]uint64),
 		tasksCompleted:  make(map[completionKey]uint64),
 		tasksRetried:    make(map[retryKey]uint64),
 		leaseRenewed:    make(map[string]uint64),
@@ -72,10 +78,35 @@ func (m *Metrics) WithTaskStatsStore(taskStatsStore store.TaskStatsStore) *Metri
 	return m
 }
 
+func (m *Metrics) RecordClaimAttempt(workflow string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claimAttempts[normalizeWorkflow(workflow)]++
+}
+
+func (m *Metrics) RecordClaimMiss(workflow string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claimMisses[normalizeWorkflow(workflow)]++
+}
+
+func normalizeWorkflow(workflow string) string {
+	if workflow == "" {
+		return "all"
+	}
+	return workflow
+}
+
 func (m *Metrics) RecordTaskClaimed(workflow string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.tasksClaimed[workflow]++
+}
+
+func (m *Metrics) RecordTaskReleased(workflow string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tasksReleased[workflow]++
 }
 
 func (m *Metrics) RecordTaskCompleted(workflow string, status domain.TaskStatus, duration time.Duration) {
@@ -145,10 +176,28 @@ func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeTaskStats(w, snapshot)
 	}
 
+	writeHelp(w, "taskpulse_claim_attempts_total", "Total task claim attempts by requested workflow.")
+	writeType(w, "taskpulse_claim_attempts_total", "counter")
+	for _, workflow := range sortedStringKeys(m.claimAttempts) {
+		fmt.Fprintf(w, "taskpulse_claim_attempts_total{workflow=%q} %d\n", workflow, m.claimAttempts[workflow])
+	}
+
+	writeHelp(w, "taskpulse_claim_misses_total", "Total task claim attempts with no available task by requested workflow.")
+	writeType(w, "taskpulse_claim_misses_total", "counter")
+	for _, workflow := range sortedStringKeys(m.claimMisses) {
+		fmt.Fprintf(w, "taskpulse_claim_misses_total{workflow=%q} %d\n", workflow, m.claimMisses[workflow])
+	}
+
 	writeHelp(w, "taskpulse_tasks_claimed_total", "Total tasks claimed by workers.")
 	writeType(w, "taskpulse_tasks_claimed_total", "counter")
 	for _, workflow := range sortedStringKeys(m.tasksClaimed) {
 		fmt.Fprintf(w, "taskpulse_tasks_claimed_total{workflow=%q} %d\n", workflow, m.tasksClaimed[workflow])
+	}
+
+	writeHelp(w, "taskpulse_tasks_released_total", "Total running tasks returned to the queue by their Worker during graceful shutdown.")
+	writeType(w, "taskpulse_tasks_released_total", "counter")
+	for _, workflow := range sortedStringKeys(m.tasksReleased) {
+		fmt.Fprintf(w, "taskpulse_tasks_released_total{workflow=%q} %d\n", workflow, m.tasksReleased[workflow])
 	}
 
 	writeHelp(w, "taskpulse_tasks_completed_total", "Total tasks completed by terminal status.")

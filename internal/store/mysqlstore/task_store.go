@@ -49,6 +49,7 @@ SELECT
     available_at,
     lease_owner,
     lease_expires_at,
+    last_heartbeat_at,
     version,
     created_at,
     updated_at,
@@ -72,6 +73,7 @@ SELECT
     available_at,
     lease_owner,
     lease_expires_at,
+    last_heartbeat_at,
     version,
     created_at,
     updated_at,
@@ -96,6 +98,7 @@ SELECT
     available_at,
     lease_owner,
     lease_expires_at,
+    last_heartbeat_at,
     version,
     created_at,
     updated_at,
@@ -123,6 +126,7 @@ SELECT
     available_at,
     lease_owner,
     lease_expires_at,
+    last_heartbeat_at,
     version,
     created_at,
     updated_at,
@@ -151,6 +155,7 @@ SELECT
     available_at,
     lease_owner,
     lease_expires_at,
+    last_heartbeat_at,
     version,
     created_at,
     updated_at,
@@ -179,6 +184,7 @@ SELECT
     available_at,
     lease_owner,
     lease_expires_at,
+    last_heartbeat_at,
     version,
     created_at,
     updated_at,
@@ -205,6 +211,7 @@ SET
     available_at = ?,
     lease_owner = ?,
     lease_expires_at = ?,
+    last_heartbeat_at = ?,
     updated_at = ?,
     started_at = ?,
     finished_at = ?,
@@ -217,6 +224,7 @@ const renewLeaseQuery = `
 UPDATE tasks
 SET
     lease_expires_at = ?,
+    last_heartbeat_at = ?,
     updated_at = ?
 WHERE id = ?
   AND status = ?
@@ -238,6 +246,7 @@ SELECT
     available_at,
     lease_owner,
     lease_expires_at,
+    last_heartbeat_at,
     version,
     created_at,
     updated_at,
@@ -414,12 +423,13 @@ func claimNextInTx(
 	leaseExpiresAt := now.Add(options.LeaseDuration)
 	task.LeaseOwner = options.WorkerID
 	task.LeaseExpiresAt = &leaseExpiresAt
+	task.LastHeartbeatAt = nil
 
 	result, err := tx.ExecContext(
 		ctx,
 		`UPDATE tasks
 		 SET status = ?, retry_count = ?, updated_at = ?, started_at = ?,
-		     lease_owner = ?, lease_expires_at = ?, version = version + 1
+		     lease_owner = ?, lease_expires_at = ?, last_heartbeat_at = NULL, version = version + 1
 		 WHERE id = ? AND version = ?`,
 		string(task.Status),
 		task.RetryCount,
@@ -463,6 +473,7 @@ func scanTask(row rowScanner) (*domain.Task, error) {
 	var errorMessage sql.NullString
 	var leaseOwner sql.NullString
 	var leaseExpiresAt sql.NullTime
+	var lastHeartbeatAt sql.NullTime
 	var startedAt sql.NullTime
 	var finishedAt sql.NullTime
 
@@ -480,6 +491,7 @@ func scanTask(row rowScanner) (*domain.Task, error) {
 		&task.AvailableAt,
 		&leaseOwner,
 		&leaseExpiresAt,
+		&lastHeartbeatAt,
 		&task.Version,
 		&task.CreatedAt,
 		&task.UpdatedAt,
@@ -503,6 +515,7 @@ func scanTask(row rowScanner) (*domain.Task, error) {
 		task.LeaseOwner = leaseOwner.String
 	}
 	task.LeaseExpiresAt = timePointer(leaseExpiresAt)
+	task.LastHeartbeatAt = timePointer(lastHeartbeatAt)
 	task.AvailableAt = task.AvailableAt.UTC()
 	task.CreatedAt = task.CreatedAt.UTC()
 	task.UpdatedAt = task.UpdatedAt.UTC()
@@ -532,6 +545,7 @@ func updateTask(ctx context.Context, executor sqlQueryExecutor, task *domain.Tas
 		task.AvailableAt.UTC(),
 		nullableString(task.LeaseOwner),
 		nullableTime(task.LeaseExpiresAt),
+		nullableTime(task.LastHeartbeatAt),
 		task.UpdatedAt.UTC(),
 		nullableTime(task.StartedAt),
 		nullableTime(task.FinishedAt),
@@ -576,6 +590,7 @@ func (s *MySQLTaskStore) RenewLease(ctx context.Context, options storeerrors.Ren
 		ctx,
 		renewLeaseQuery,
 		leaseExpiresAt,
+		now,
 		now,
 		options.TaskID,
 		string(domain.TaskStatusRunning),

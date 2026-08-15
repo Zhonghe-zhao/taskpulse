@@ -115,6 +115,31 @@ func TestTaskSchedulesRetryAndClearsLease(t *testing.T) {
 	}
 }
 
+func TestTaskRequeuesForGracefulReleaseWithoutUsingRetryBudget(t *testing.T) {
+	now := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	task, err := NewTask("task_1", "llm_analysis", nil, 3, now)
+	if err != nil {
+		t.Fatalf("NewTask returned error: %v", err)
+	}
+	if err := task.MoveTo(TaskStatusRunning, now.Add(time.Second)); err != nil {
+		t.Fatalf("MoveTo running returned error: %v", err)
+	}
+	leaseUntil := now.Add(time.Minute)
+	task.LeaseOwner = "worker_1"
+	task.LeaseExpiresAt = &leaseUntil
+	task.Progress = 60
+	task.RetryCount = 2
+
+	releasedAt := now.Add(2 * time.Second)
+	if err := task.RequeueForRelease(releasedAt); err != nil {
+		t.Fatalf("RequeueForRelease returned error: %v", err)
+	}
+	if task.Status != TaskStatusQueued || task.Progress != 0 || task.RetryCount != 2 ||
+		task.LeaseOwner != "" || task.LeaseExpiresAt != nil || !task.AvailableAt.Equal(releasedAt) {
+		t.Fatalf("unexpected released task: %+v", task)
+	}
+}
+
 func TestTaskRejectsRetryWithoutBudget(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	task, err := NewTask("task_1", "llm_analysis", nil, 0, now)

@@ -83,6 +83,13 @@ func TestMySQLTaskCreationStoreCommitsTaskAndEventIntegration(t *testing.T) {
 	if len(events) != 1 || events[0].ID != eventID {
 		t.Fatalf("unexpected committed events: %+v", events)
 	}
+	var outboxCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM task_outbox WHERE task_id = ?", taskID).Scan(&outboxCount); err != nil {
+		t.Fatalf("count task outbox records: %v", err)
+	}
+	if outboxCount != 0 {
+		t.Fatalf("task creation wrote %d outbox records without an active dispatcher", outboxCount)
+	}
 
 	replayTask, replayEvent := newMySQLTaskCreationPair(
 		t,

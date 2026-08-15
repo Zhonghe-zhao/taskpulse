@@ -23,6 +23,7 @@ type WorkerTaskService struct {
 	taskStore       store.TaskStore
 	transitionStore store.TaskTransitionStore
 	retryScheduler  TaskRetryScheduler
+	metrics         WorkerTaskMetrics
 	now             func() time.Time
 }
 
@@ -31,6 +32,27 @@ type WorkerTaskService struct {
 type TaskRetryScheduler interface {
 	Schedule(ctx context.Context, task *domain.Task, code, message string, retryAfter time.Duration) error
 }
+
+// WorkerTaskMetrics records operations completed through the public Worker
+// protocol. It mirrors the internal worker metrics so external Workers add to
+// the same Prometheus series.
+type WorkerTaskMetrics interface {
+	RecordTaskClaimed(workflow string)
+	RecordTaskReleased(workflow string)
+	RecordTaskCompleted(workflow string, status domain.TaskStatus, duration time.Duration)
+	RecordTaskRetried(workflow string, errorCode string)
+	RecordLeaseRenewed(workflow string)
+	RecordLeaseLost(workflow string)
+}
+
+type noopWorkerTaskMetrics struct{}
+
+func (noopWorkerTaskMetrics) RecordTaskClaimed(string)                                     {}
+func (noopWorkerTaskMetrics) RecordTaskReleased(string)                                    {}
+func (noopWorkerTaskMetrics) RecordTaskCompleted(string, domain.TaskStatus, time.Duration) {}
+func (noopWorkerTaskMetrics) RecordTaskRetried(string, string)                             {}
+func (noopWorkerTaskMetrics) RecordLeaseRenewed(string)                                    {}
+func (noopWorkerTaskMetrics) RecordLeaseLost(string)                                       {}
 
 type ClaimTaskInput struct {
 	WorkerID      string
@@ -55,12 +77,12 @@ type CompleteTaskInput struct {
 }
 
 type ReportProgressInput struct {
-	TaskID   string
-	WorkerID string
-	Version  uint64
+	TaskID     string
+	WorkerID   string
+	Version    uint64
 	LeaseToken string
-	Progress int
-	Message  string
+	Progress   int
+	Message    string
 }
 
 type FailTaskInput struct {
@@ -74,6 +96,13 @@ type FailTaskInput struct {
 	RetryAfter   time.Duration
 }
 
+type ReleaseTaskInput struct {
+	TaskID     string
+	WorkerID   string
+	Version    uint64
+	LeaseToken string
+}
+
 func NewWorkerTaskService(
 	taskStore store.TaskStore,
 	transitionStore store.TaskTransitionStore,
@@ -81,6 +110,7 @@ func NewWorkerTaskService(
 	return &WorkerTaskService{
 		taskStore:       taskStore,
 		transitionStore: transitionStore,
+		metrics:         noopWorkerTaskMetrics{},
 		now:             time.Now,
 	}
 }
@@ -90,11 +120,18 @@ func (s *WorkerTaskService) WithRetryScheduler(scheduler TaskRetryScheduler) *Wo
 	return s
 }
 
+func (s *WorkerTaskService) WithMetrics(metrics WorkerTaskMetrics) *WorkerTaskService {
+	if metrics != nil {
+		s.metrics = metrics
+	}
+	return s
+}
+
 func (s *WorkerTaskService) ClaimTask(
 	ctx context.Context,
 	input ClaimTaskInput,
 ) (*domain.Task, error) {
-	if strings.TrimSpace(input.WorkerID) == "" || input.LeaseDuration <= 0 {
+	if strings.TrimSpace(input.WorkerID) == "" || strings.TrimSpace(input.Workflow) == "" || input.LeaseDuration <= 0 {
 		return nil, ErrInvalidWorkerRequest
 	}
 	task, err := s.transitionStore.ClaimNextWithEvent(
@@ -110,6 +147,7 @@ func (s *WorkerTaskService) ClaimTask(
 	if err != nil {
 		return nil, err
 	}
+	s.metrics.RecordTaskClaimed(task.Workflow)
 	return withLeaseToken(task), nil
 }
 
@@ -122,6 +160,7 @@ func (s *WorkerTaskService) HeartbeatTask(
 	}
 	now := s.now()
 	if err := s.validateLeaseToken(ctx, input.TaskID, input.WorkerID, input.LeaseToken); err != nil {
+		s.recordLeaseLoss(ctx, input.TaskID, err)
 		return nil, err
 	}
 	if err := s.taskStore.RenewLease(ctx, store.RenewLeaseOptions{
@@ -130,12 +169,14 @@ func (s *WorkerTaskService) HeartbeatTask(
 		Now:           now,
 		LeaseDuration: input.LeaseDuration,
 	}); err != nil {
+		s.recordLeaseLoss(ctx, input.TaskID, err)
 		return nil, err
 	}
 	task, err := s.taskStore.Get(ctx, input.TaskID)
 	if err != nil {
 		return nil, err
 	}
+	s.metrics.RecordLeaseRenewed(task.Workflow)
 	return withLeaseToken(task), nil
 }
 
@@ -143,9 +184,19 @@ func (s *WorkerTaskService) CompleteTask(
 	ctx context.Context,
 	input CompleteTaskInput,
 ) (*domain.Task, error) {
+	result := input.ResultRef
+	if len(result) == 0 {
+		result = input.Output
+	}
+	if len(result) == 0 {
+		result = json.RawMessage("{}")
+	}
 	if task, replayed, err := s.replayWorkerOperation(ctx, input.TaskID, input.WorkerID, input.LeaseToken, domain.TaskStatusSucceeded); err != nil {
 		return nil, err
 	} else if replayed {
+		if !jsonSemanticallyEqual(task.Result, result) {
+			return nil, store.ErrTaskConflict
+		}
 		return task, nil
 	}
 	version, err := s.resolveLeaseVersion(ctx, input.TaskID, input.WorkerID, input.Version, input.LeaseToken)
@@ -155,13 +206,6 @@ func (s *WorkerTaskService) CompleteTask(
 	task, err := s.prepareRunningTask(ctx, input.TaskID, input.WorkerID, version)
 	if err != nil {
 		return nil, err
-	}
-	result := input.ResultRef
-	if len(result) == 0 {
-		result = input.Output
-	}
-	if len(result) == 0 {
-		result = json.RawMessage("{}")
 	}
 	task.Result = append(json.RawMessage(nil), result...)
 	task.Progress = 100
@@ -174,7 +218,7 @@ func (s *WorkerTaskService) CompleteTask(
 		task.ID,
 		domain.EventTaskSucceeded,
 		"task succeeded by external worker",
-		json.RawMessage("{}"),
+		mustMarshalEventPayload(map[string]any{"worker_id": input.WorkerID}),
 		task.Progress,
 		now,
 	)
@@ -184,6 +228,7 @@ func (s *WorkerTaskService) CompleteTask(
 	if err := s.transitionStore.UpdateTaskWithEvent(ctx, task, event); err != nil {
 		return nil, err
 	}
+	s.metrics.RecordTaskCompleted(task.Workflow, domain.TaskStatusSucceeded, taskElapsed(task, now))
 	return task, nil
 }
 
@@ -210,8 +255,9 @@ func (s *WorkerTaskService) ReportProgress(
 		message = "task progress updated"
 	}
 	payload, err := json.Marshal(map[string]any{
-		"progress": input.Progress,
-		"message":  message,
+		"progress":  input.Progress,
+		"message":   message,
+		"worker_id": input.WorkerID,
 	})
 	if err != nil {
 		return nil, err
@@ -245,6 +291,9 @@ func (s *WorkerTaskService) FailTask(
 	if task, replayed, err := s.replayWorkerOperation(ctx, input.TaskID, input.WorkerID, input.LeaseToken, domain.TaskStatusRetrying, domain.TaskStatusFailed); err != nil {
 		return nil, err
 	} else if replayed {
+		if task.ErrorMessage != input.ErrorCode+": "+input.ErrorMessage {
+			return nil, store.ErrTaskConflict
+		}
 		return task, nil
 	}
 	version, err := s.resolveLeaseVersion(ctx, input.TaskID, input.WorkerID, input.Version, input.LeaseToken)
@@ -270,6 +319,7 @@ func (s *WorkerTaskService) FailTask(
 			input.RetryAfter,
 		)
 		if err == nil {
+			s.metrics.RecordTaskRetried(task.Workflow, input.ErrorCode)
 			return s.taskStore.Get(ctx, task.ID)
 		}
 		if !errors.Is(err, domain.ErrRetryBudgetExhausted) {
@@ -284,6 +334,7 @@ func (s *WorkerTaskService) FailTask(
 	payload, err := json.Marshal(map[string]any{
 		"error_code": input.ErrorCode,
 		"retryable":  input.Retryable,
+		"worker_id":  input.WorkerID,
 	})
 	if err != nil {
 		return nil, err
@@ -303,7 +354,87 @@ func (s *WorkerTaskService) FailTask(
 	if err := s.transitionStore.UpdateTaskWithEvent(ctx, task, event); err != nil {
 		return nil, err
 	}
+	s.metrics.RecordTaskCompleted(task.Workflow, domain.TaskStatusFailed, taskElapsed(task, now))
 	return task, nil
+}
+
+func jsonSemanticallyEqual(left, right json.RawMessage) bool {
+	var leftValue any
+	var rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
+	}
+	leftJSON, leftErr := json.Marshal(leftValue)
+	rightJSON, rightErr := json.Marshal(rightValue)
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
+}
+
+// ReleaseTask immediately makes a running task available after its current
+// Worker has stopped execution during graceful shutdown. The same fencing
+// token that protects Complete and Fail prevents an old Worker from releasing
+// or completing a task claimed by its replacement.
+func (s *WorkerTaskService) ReleaseTask(
+	ctx context.Context,
+	input ReleaseTaskInput,
+) (*domain.Task, error) {
+	if task, replayed, err := s.replayWorkerOperation(ctx, input.TaskID, input.WorkerID, input.LeaseToken, domain.TaskStatusQueued); err != nil {
+		return nil, err
+	} else if replayed {
+		return task, nil
+	}
+	version, err := s.resolveLeaseVersion(ctx, input.TaskID, input.WorkerID, input.Version, input.LeaseToken)
+	if err != nil {
+		return nil, err
+	}
+	task, err := s.prepareRunningTask(ctx, input.TaskID, input.WorkerID, version)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	if err := task.RequeueForRelease(now); err != nil {
+		return nil, err
+	}
+	event, err := domain.NewTaskReleasedEvent(identity.New("event"), task, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.transitionStore.UpdateTaskWithEvent(ctx, task, event); err != nil {
+		return nil, err
+	}
+	s.metrics.RecordTaskReleased(task.Workflow)
+	return s.taskStore.Get(ctx, task.ID)
+}
+
+func (s *WorkerTaskService) recordLeaseLoss(ctx context.Context, taskID string, err error) {
+	if !errors.Is(err, store.ErrLeaseLost) {
+		return
+	}
+	task, getErr := s.taskStore.Get(ctx, taskID)
+	if getErr == nil {
+		s.metrics.RecordLeaseLost(task.Workflow)
+	}
+}
+
+func taskElapsed(task *domain.Task, now time.Time) time.Duration {
+	if task == nil {
+		return 0
+	}
+	startedAt := task.CreatedAt
+	if task.StartedAt != nil {
+		startedAt = *task.StartedAt
+	}
+	if now.Before(startedAt) {
+		return 0
+	}
+	return now.Sub(startedAt)
+}
+
+func mustMarshalEventPayload(value any) json.RawMessage {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	return payload
 }
 
 type leaseTokenPayload struct {
@@ -342,7 +473,7 @@ func parseLeaseToken(raw string) (leaseTokenPayload, error) {
 
 func (s *WorkerTaskService) validateLeaseToken(ctx context.Context, taskID, workerID, token string) error {
 	if strings.TrimSpace(token) == "" {
-		return nil
+		return store.ErrLeaseLost
 	}
 	payload, err := parseLeaseToken(token)
 	if err != nil || payload.TaskID != taskID || payload.WorkerID != workerID {
@@ -360,7 +491,7 @@ func (s *WorkerTaskService) validateLeaseToken(ctx context.Context, taskID, work
 
 func (s *WorkerTaskService) resolveLeaseVersion(ctx context.Context, taskID, workerID string, version uint64, token string) (uint64, error) {
 	if strings.TrimSpace(token) == "" {
-		return version, nil
+		return 0, store.ErrLeaseLost
 	}
 	payload, err := parseLeaseToken(token)
 	if err != nil || payload.TaskID != taskID || payload.WorkerID != workerID {
@@ -384,7 +515,7 @@ func (s *WorkerTaskService) replayWorkerOperation(
 	statuses ...domain.TaskStatus,
 ) (*domain.Task, bool, error) {
 	if strings.TrimSpace(token) == "" {
-		return nil, false, nil
+		return nil, false, store.ErrLeaseLost
 	}
 	payload, err := parseLeaseToken(token)
 	if err != nil || payload.TaskID != taskID || payload.WorkerID != workerID {

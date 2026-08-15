@@ -33,6 +33,8 @@ type Executor interface {
 }
 
 type MetricsRecorder interface {
+	RecordClaimAttempt(workflow string)
+	RecordClaimMiss(workflow string)
 	RecordTaskClaimed(workflow string)
 	RecordTaskCompleted(workflow string, status domain.TaskStatus, duration time.Duration)
 	RecordTaskRetried(workflow string, errorCode string)
@@ -42,7 +44,9 @@ type MetricsRecorder interface {
 
 type noopMetricsRecorder struct{}
 
-func (noopMetricsRecorder) RecordTaskClaimed(string) {}
+func (noopMetricsRecorder) RecordClaimAttempt(string) {}
+func (noopMetricsRecorder) RecordClaimMiss(string)    {}
+func (noopMetricsRecorder) RecordTaskClaimed(string)  {}
 func (noopMetricsRecorder) RecordTaskCompleted(string, domain.TaskStatus, time.Duration) {
 }
 func (noopMetricsRecorder) RecordTaskRetried(string, string) {}
@@ -125,6 +129,7 @@ func (w *Worker) SetLeaseDuration(leaseDuration time.Duration) error {
 // 当前逻辑Worker从队列中领取任务 添加事件 识别工作流 执行相应任务
 func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 	now := w.now()
+	w.metrics.RecordClaimAttempt("all")
 	task, err := w.transitionStore.ClaimNextWithEvent(
 		ctx,
 		store.ClaimOptions{
@@ -135,6 +140,7 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 		identity.New("event"),
 	)
 	if errors.Is(err, store.ErrNoTaskAvailable) {
+		w.metrics.RecordClaimMiss("all")
 		return false, nil
 	}
 	if err != nil {

@@ -1,14 +1,18 @@
 package httptransport
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/zhaozhonghe/taskpulse/internal/application"
+	"github.com/zhaozhonghe/taskpulse/internal/domain"
 	"github.com/zhaozhonghe/taskpulse/internal/store"
 )
 
@@ -17,6 +21,13 @@ const maxRequestBodyBytes = 1 << 20
 type Handler struct {
 	taskService       *application.TaskService
 	workerTaskService *application.WorkerTaskService
+	claimMetrics      claimMetricsRecorder
+	workerAuthToken   string
+}
+
+type claimMetricsRecorder interface {
+	RecordClaimAttempt(workflow string)
+	RecordClaimMiss(workflow string)
 }
 
 func NewHandler(taskService *application.TaskService) *Handler {
@@ -31,6 +42,37 @@ func NewHandlerWithWorker(
 		taskService:       taskService,
 		workerTaskService: workerTaskService,
 	}
+}
+
+func (h *Handler) WithClaimMetrics(metrics claimMetricsRecorder) *Handler {
+	h.claimMetrics = metrics
+	return h
+}
+
+// WithWorkerAuthToken requires a bearer token for every Worker protocol call.
+// An empty token is only intended for isolated unit tests or explicitly
+// configured insecure local development.
+func (h *Handler) WithWorkerAuthToken(token string) *Handler {
+	h.workerAuthToken = strings.TrimSpace(token)
+	return h
+}
+
+func (h *Handler) authorizeWorker(w http.ResponseWriter, r *http.Request) bool {
+	if h.workerAuthToken == "" {
+		return true
+	}
+	const prefix = "Bearer "
+	authorization := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authorization, prefix) {
+		writeError(w, http.StatusUnauthorized, "worker authentication is required")
+		return false
+	}
+	provided := strings.TrimPrefix(authorization, prefix)
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(h.workerAuthToken)) != 1 {
+		writeError(w, http.StatusUnauthorized, "worker authentication is required")
+		return false
+	}
+	return true
 }
 
 type createTaskRequest struct {
@@ -63,7 +105,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
-	task, err := h.taskService.GetTask(r.Context(), r.PathValue("task_id"))
+	task, err := h.taskService.GetTaskDetail(r.Context(), r.PathValue("task_id"))
 	if err != nil {
 		writeApplicationError(w, err)
 		return
@@ -71,13 +113,54 @@ func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, task)
 }
 
-func (h *Handler) CancelTask(w http.ResponseWriter, r *http.Request) {
-	task, err := h.taskService.CancelTask(r.Context(), r.PathValue("task_id"))
+func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		limit = parsed
+	}
+	result, err := h.taskService.ListTasks(r.Context(), application.ListTasksInput{
+		Workflow: r.URL.Query().Get("workflow"),
+		Status:   domain.TaskStatus(r.URL.Query().Get("status")),
+		Cursor:   r.URL.Query().Get("cursor"),
+		Limit:    limit,
+	})
 	if err != nil {
 		writeApplicationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, task)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) GetTaskStats(w http.ResponseWriter, r *http.Request) {
+	result, err := h.taskService.GetTaskStats(r.Context(), application.TaskStatsInput{
+		Workflow: r.URL.Query().Get("workflow"),
+		Status:   domain.TaskStatus(r.URL.Query().Get("status")),
+	})
+	if err != nil {
+		writeApplicationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) CancelTask(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("task_id")
+	_, err := h.taskService.CancelTask(r.Context(), taskID)
+	if err != nil {
+		writeApplicationError(w, err)
+		return
+	}
+	detail, err := h.taskService.GetTaskDetail(r.Context(), taskID)
+	if err != nil {
+		writeApplicationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
 }
 
 func (h *Handler) ListTaskEvents(w http.ResponseWriter, r *http.Request) {
@@ -127,9 +210,18 @@ type workerFailRequest struct {
 	RetryAfter   string `json:"retry_after"`
 }
 
+type workerReleaseRequest struct {
+	WorkerID   string `json:"worker_id"`
+	LeaseToken string `json:"lease_token"`
+	Version    uint64 `json:"version"`
+}
+
 func (h *Handler) ClaimWorkerTask(w http.ResponseWriter, r *http.Request) {
 	if h.workerTaskService == nil {
 		writeError(w, http.StatusNotFound, "worker protocol is not configured")
+		return
+	}
+	if !h.authorizeWorker(w, r) {
 		return
 	}
 	var request workerClaimRequest
@@ -142,12 +234,18 @@ func (h *Handler) ClaimWorkerTask(w http.ResponseWriter, r *http.Request) {
 		writeApplicationError(w, err)
 		return
 	}
+	if h.claimMetrics != nil {
+		h.claimMetrics.RecordClaimAttempt(request.Workflow)
+	}
 	task, err := h.workerTaskService.ClaimTask(r.Context(), application.ClaimTaskInput{
 		WorkerID:      request.WorkerID,
 		Workflow:      request.Workflow,
 		LeaseDuration: leaseDuration,
 	})
 	if errors.Is(err, store.ErrNoTaskAvailable) {
+		if h.claimMetrics != nil {
+			h.claimMetrics.RecordClaimMiss(request.Workflow)
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -161,6 +259,9 @@ func (h *Handler) ClaimWorkerTask(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HeartbeatWorkerTask(w http.ResponseWriter, r *http.Request) {
 	if h.workerTaskService == nil {
 		writeError(w, http.StatusNotFound, "worker protocol is not configured")
+		return
+	}
+	if !h.authorizeWorker(w, r) {
 		return
 	}
 	var request workerHeartbeatRequest
@@ -191,18 +292,21 @@ func (h *Handler) CompleteWorkerTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "worker protocol is not configured")
 		return
 	}
+	if !h.authorizeWorker(w, r) {
+		return
+	}
 	var request workerCompleteRequest
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	task, err := h.workerTaskService.CompleteTask(r.Context(), application.CompleteTaskInput{
-		TaskID:   r.PathValue("task_id"),
-		WorkerID: request.WorkerID,
+		TaskID:     r.PathValue("task_id"),
+		WorkerID:   request.WorkerID,
 		LeaseToken: request.LeaseToken,
-		Version:  request.Version,
-		Output:   request.Output,
-		ResultRef: request.ResultRef,
+		Version:    request.Version,
+		Output:     request.Output,
+		ResultRef:  request.ResultRef,
 	})
 	if err != nil {
 		writeApplicationError(w, err)
@@ -216,18 +320,21 @@ func (h *Handler) ReportWorkerProgress(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "worker protocol is not configured")
 		return
 	}
+	if !h.authorizeWorker(w, r) {
+		return
+	}
 	var request workerProgressRequest
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	task, err := h.workerTaskService.ReportProgress(r.Context(), application.ReportProgressInput{
-		TaskID:   r.PathValue("task_id"),
-		WorkerID: request.WorkerID,
+		TaskID:     r.PathValue("task_id"),
+		WorkerID:   request.WorkerID,
 		LeaseToken: request.LeaseToken,
-		Version:  request.Version,
-		Progress: request.Progress,
-		Message:  request.Message,
+		Version:    request.Version,
+		Progress:   request.Progress,
+		Message:    request.Message,
 	})
 	if err != nil {
 		writeApplicationError(w, err)
@@ -239,6 +346,9 @@ func (h *Handler) ReportWorkerProgress(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) FailWorkerTask(w http.ResponseWriter, r *http.Request) {
 	if h.workerTaskService == nil {
 		writeError(w, http.StatusNotFound, "worker protocol is not configured")
+		return
+	}
+	if !h.authorizeWorker(w, r) {
 		return
 	}
 	var request workerFailRequest
@@ -260,6 +370,32 @@ func (h *Handler) FailWorkerTask(w http.ResponseWriter, r *http.Request) {
 		ErrorMessage: request.ErrorMessage,
 		Retryable:    request.Retryable,
 		RetryAfter:   retryAfter,
+	})
+	if err != nil {
+		writeApplicationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *Handler) ReleaseWorkerTask(w http.ResponseWriter, r *http.Request) {
+	if h.workerTaskService == nil {
+		writeError(w, http.StatusNotFound, "worker protocol is not configured")
+		return
+	}
+	if !h.authorizeWorker(w, r) {
+		return
+	}
+	var request workerReleaseRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	task, err := h.workerTaskService.ReleaseTask(r.Context(), application.ReleaseTaskInput{
+		TaskID:     r.PathValue("task_id"),
+		WorkerID:   request.WorkerID,
+		LeaseToken: request.LeaseToken,
+		Version:    request.Version,
 	})
 	if err != nil {
 		writeApplicationError(w, err)
