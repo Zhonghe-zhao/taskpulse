@@ -38,6 +38,7 @@ MySQL 在同一事务中完成：
 - 旧版本 Worker 写回结果时会受到乐观锁保护。
 - Worker 执行任务期间按租约时长的三分之一周期续租；
 - 只有租约未过期且 `lease_owner` 匹配的 Worker 可以续租；
+- 外部 Worker 的 Heartbeat、Progress、Complete 和 Fail 必须携带 LeaseToken；空 token、旧 token 或错误 token 会被拒绝；
 - 续租不修改任务业务版本，避免心跳与完成写回发生版本冲突。
 - 过期的 `running` 任务可以被新 Worker 原子接管；
 - 接管会增加 `retry_count` 和 `version`，隔离旧 Worker 的写回；
@@ -45,11 +46,11 @@ MySQL 在同一事务中完成：
 - Reaper 将重试额度耗尽的过期任务转换为 `failed`；
 - 清理失败任务时会清除租约、记录结束时间、增加版本并写入失败事件。
 
-## 尚未实现
+## 当前边界与待验证项
 
-- Worker 崩溃恢复实验；
-- 重复执行时的业务幂等。
-- 可查询和人工重放的死信任务。
+- Worker 崩溃恢复的代码路径、Kubernetes/Compose 清单与实验步骤已完成；最终交付仍需要保留一次运行时 TaskEvent 证据。
+- TaskPulse 提供至少一次执行尝试；MemoBridge 已使用 `source_item_id + content_hash + prompt_version` 做业务写回幂等。其他接入方也必须自行保证外部副作用幂等。
+- 可查询和人工重放的死信任务尚未实现；重试预算耗尽后的任务当前进入 `failed`。
 
 只有 `retry_count < max_retries` 的过期任务可以被接管。达到重试上限后，Reaper 会将任务收敛为 `failed`，避免任务永久停留在 `running`。
 
@@ -59,16 +60,20 @@ MySQL 在同一事务中完成：
 
 原因是 Worker 可能已经完成外部副作用，但在写回任务结果前崩溃。系统无法仅通过任务表判断副作用是否发生，因此恢复后可能再次执行。最终需要执行器使用幂等键、唯一约束或结果去重来处理重复执行。
 
-## 下一步
+## 后续演进
 
-1. 编写停止 Worker 进程后的恢复实验。
-2. 为执行器补充幂等约束。
-3. 设计死信查询和人工重放接口。
+1. 保存 Compose/Kubernetes 崩溃恢复实验的原始事件与指标。
+2. 依据 MySQL 调度基线决定是否需要 Redis 通知层。
+3. 只有出现真实运维需求后再设计死信查询与人工重放接口。
 
 
 ---
 
-# RetryCount
+# 历史故障记录：Heartbeat `context canceled` 误判（已修复）
+
+> 以下是 2026-08-06 的旧版本故障复盘，用于解释为什么需要区分“正常执行结束后的 Context 取消”和“真正的 Heartbeat 失败”。当前 Worker Runtime 已在取消后忽略该正常取消路径，且相关回归测试已通过。不要把下方的 `external_worker_error: context canceled` 结论描述为当前版本仍存在的问题。
+
+## RetryCount
 
 从时间线看，答案可以非常明确：
 

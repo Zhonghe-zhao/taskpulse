@@ -113,6 +113,8 @@ Worker 领取后必须：
 4. hash 不一致时报告 `source_changed`；
 5. 检查 prompt_version 是否有效。
 
+后续所有 `heartbeat`、`progress`、`complete`、`fail` 请求都必须回传 Claim 或上一次响应中的 `lease_token`。TaskPulse 会同时校验 token 内的任务 ID、Worker ID 和 version；缺失、错误或已经过期的 token 都会被拒绝，旧 Worker 不能覆盖新 Worker 的状态。
+
 ## 幂等写回
 
 SemanticProfile 的业务幂等键为：

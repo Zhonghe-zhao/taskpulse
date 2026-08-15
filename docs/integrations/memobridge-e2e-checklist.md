@@ -63,3 +63,9 @@ MemoBridge 创建任务
 ## 当前边界
 
 `result_ref` 只保存业务结果引用，例如 `source_item_id`、`content_hash` 和 `prompt_version`。完整 SemanticProfile 保存在 MemoBridge，TaskPulse 不保存完整 LLM 输出。
+
+## 已完成的真实联调
+
+2026-08-12 至 2026-08-13 已使用真实 SourceItem、真实 DeepSeek Provider 和独立 MemoBridge Worker 完成成功、幂等、Provider 失败重试、优雅交接与强制崩溃恢复。详细环境、步骤、事件和结论见：
+
+[23：MemoBridge 真实 LLM 可靠执行联调](../experiments/23-memobridge-real-llm-reliability.md)

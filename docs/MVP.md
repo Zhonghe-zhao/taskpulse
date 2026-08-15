@@ -1,4 +1,6 @@
-# TaskPulse MVP 路线图
+# TaskPulse MVP 路线图（历史演进记录）
+
+> 注意：本文记录项目早期的实施路线，不是当前能力的权威来源。当前代码状态见 [PROJECT_STATUS.md](PROJECT_STATUS.md)，最终验收见 [ACCEPTANCE_CHECKLIST.md](ACCEPTANCE_CHECKLIST.md)，当前架构见 [ARCHITECTURE.md](ARCHITECTURE.md)。本文中的未勾选项不自动代表当前功能缺失。
 
 - 文档状态：执行中
 - 最近更新：2026-07-30

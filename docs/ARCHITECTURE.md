@@ -1,21 +1,21 @@
 # TaskPulse 系统架构
 
 - 文档状态：当前架构说明
-- 最近更新：2026-07-30
+- 最近更新：2026-08-16
 - 相关决策：[ADR-0001：使用 MySQL 8](adr/0001-use-mysql-as-system-of-record.md)、[ADR-0002：原子创建任务与初始事件](adr/0002-atomic-task-and-created-event.md)、[ADR-0003：原子提交任务终态与终态事件](adr/0003-atomic-terminal-task-transition.md)、[ADR-0004：原子提交任务领取与领取事件](adr/0004-atomic-task-claim-event.md)、[ADR-0005：原子提交过期任务失败与失败事件](adr/0005-atomic-expired-task-failure.md)、[ADR-0006：通用错误分类与重试语义](adr/0006-generic-retry-semantics.md)、[ADR-0007：任务创建幂等](adr/0007-idempotent-task-creation.md)、[ADR-0008：原子取消待执行任务](adr/0008-cancel-pending-tasks.md)、[ADR-0009：静态 LLM Analysis Workflow](adr/0009-static-llm-analysis-workflow.md)
 
 ## 架构目标
 
-TaskPulse 当前采用**模块化单体**：HTTP API、应用层、Worker 和执行器运行在同一个进程中，但通过接口保持模块边界。
+TaskPulse 当前采用“**模块化控制面 + 可独立部署的业务 Worker**”架构：控制面仍是单个 Go 服务，负责 HTTP API、应用用例和 MySQL 状态；Worker 可以是内置示例 Worker，也可以是使用公共 SDK 的独立进程或容器。
 
-当前阶段优先验证任务生命周期和可靠性问题，不通过拆分微服务制造复杂度。未来将 API 和 Worker 拆为独立进程时，领域模型和应用接口应尽量保持稳定。
+这样既不为了微服务拆分而拆分，也让业务方无需复制 Claim、Lease、Heartbeat、Retry 或状态机代码。业务 Worker 只注册自己理解的 workflow Executor。
 
 ## 当前运行架构
 
 ```text
-客户端
+业务 API（例如 MemoBridge）
   │
-  │ POST /tasks / POST /tasks/{id}/cancel
+  │ 公共 Go Client：POST /tasks
   ▼
 transport/http
   │ 解析 JSON、映射 HTTP 状态码
@@ -28,27 +28,29 @@ MySQL TaskCreationStore
   ▼
 MySQL 8（Task/Event 真相源与任务队列）
   ▲
-  │ ClaimNextWithEvent / RenewLease / UpdateTaskWithEvent / FailNextExpiredWithEvent
+  │ Worker HTTP 协议：Claim / Heartbeat / Progress / Complete / Fail
   │
-worker.Worker + Reaper
+外部 Worker Runtime（独立进程或容器）
   │
   ▼
-Executor Registry
-  │ workflow=url_check / llm_analysis
+业务 Executor Registry
+  │ workflow=llm_analysis / memobridge.semantic_profile / memobridge.embedding_index
   ▼
-URLCheckExecutor / LLMAnalysisExecutor
-  │ URL 检测或 LLM 分析
+MemoBridge SemanticProfile/Embedding Executor / LLM Analysis Executor
+  │ 读取业务数据、调用外部服务、业务幂等写回
   ▼
 Result + TaskEvent
 ```
 
-API 创建任务后立即返回。后台 Worker 使用 MySQL 事务原子领取任务并调用对应 Executor，通过租约心跳和版本号处理崩溃恢复与旧 Worker 隔离。Reaper 将重试额度耗尽的过期任务收敛为失败。单个进程当前只有一个任务级 Worker，因此多个 Task 之间顺序执行；单个 URL Check Task 内部最多并发检测 5 个 URL。`llm_analysis` 当前使用 Fake LLM Client 验证执行边界，尚未接入真实 Provider。
+API 创建任务后立即返回。Worker Runtime 使用 MySQL 事务原子领取任务，并通过租约心跳和版本号处理崩溃恢复与旧 Worker 隔离。Reaper 将重试额度耗尽的过期任务收敛为失败。`llm-worker` 是使用 Runtime 的示例；MemoBridge Worker 使用同一 Runtime 处理 `memobridge.semantic_profile`。真实 LLM Provider 的所有权属于业务 Worker，不属于 TaskPulse。
 
 ## 当前模块
 
 | 模块 | 代码位置 | 职责 |
 |---|---|---|
 | 启动与组装 | `cmd/taskpulse` | 创建 Store、Service、Worker、Executor 和 HTTP Server |
+| 公共 Client SDK | `pkg/taskpulse` | 创建、查询、取消和 Worker HTTP 协议的 Go Client |
+| 公共 Worker Runtime | `pkg/taskpulseworker` | 轮询、注册 Executor、Heartbeat、进度、完成/失败和优雅退出 |
 | Domain | `internal/domain` | Task、TaskEvent、状态机和合法状态流转 |
 | Application | `internal/application` | 编排创建任务、查询任务和查询事件用例 |
 | Store | `internal/store`、`internal/store/mysqlstore` | 定义存储接口，提供内存测试实现和 MySQL 运行实现 |
@@ -65,6 +67,9 @@ API 创建任务后立即返回。后台 Worker 使用 MySQL 事务原子领取�
 ```text
 transport/http → application → domain
                          └──→ store interfaces
+
+pkg/taskpulseworker → pkg/taskpulse → transport/http
+                  └──→ 业务 Executor
 
 worker → domain
       └→ store interfaces
@@ -103,7 +108,8 @@ store implementations → domain
 - Worker 租约、心跳续租、过期接管和版本隔离。
 - Memory/MySQL Store 统一按照 `available_at` 控制任务可领取时间。
 - 领取路径通过 `ClaimKind` 区分 initial、retry 和 recovery，避免根据重试次数猜测来源。
-- Worker 仅对明确分类的 transient 错误应用 workflow 重试策略，普通错误和永久错误直接失败。
+- 内置 Worker 与外部 Worker Runtime 仅对明确分类的 transient 错误应用 workflow 重试策略，普通错误和永久错误直接失败。
+- Worker Runtime 对 TaskPulse 控制面网络错误、HTTP 429 和 5xx 使用独立的有上限指数退避，避免控制面故障时多 Worker 以固定频率同步重试。
 - 重试等待、重新领取和生命周期事件均持久化，可跨进程重启继续调度。
 - 重试额度耗尽后的 Reaper 失败清理。
 - Worker 根据 workflow 选择 Executor。
@@ -111,6 +117,8 @@ store implementations → domain
 - `llm_analysis` 静态 workflow、可替换 LLM Client、Fake Client 和 LLM 错误分类边界。
 - Worker/Reaper 结构化日志，记录领取、完成、失败、重试、续租和过期清理。
 - `/metrics` Prometheus 文本格式指标，记录任务状态分布、可领取任务积压、最老等待时间、任务领取、完成、重试、租约和执行耗时。
+- 公共 Go Client 与 Worker Runtime；外部 Worker 通过 workflow 过滤领取任务，并携带 lease token/version 进行 fencing。
+- Compose 和 Kubernetes 清单；Kubernetes 使用 TaskPulse Deployment 与独立 Worker Deployment。
 - Context 传递、HTTP 超时和进程信号处理。
 - Domain、Store、Application、HTTP、Worker、Executor 单元测试。
 
@@ -118,15 +126,16 @@ store implementations → domain
 
 - 人工死信重放尚未完成。
 - 实时事件推送尚未完成。
-- `llm_analysis` 尚未接入真实 LLM Provider，当前只用 Fake Client 验证执行链路。
+- TaskPulse 自带的 `llm_analysis` 示例仍使用 Fake Client；真实 Provider 由 MemoBridge 等业务 Worker持有，真实 SemanticProfile 与 Embedding 负载已经完成联调。
 - SSRF 防护；当前 URL Executor 不能直接暴露到公网。
-- 尚未接入 Prometheus Server、Grafana、Redis 或 Kubernetes。
+- 尚未接入 Prometheus Server、Grafana 或 Redis；当前只暴露 Prometheus 格式 `/metrics`。
+- Kubernetes 已在 Docker Desktop 本地多节点集群完成多副本和 Worker 故障实验，但不代表生产可用。
 
 这些是后续要通过实现和实验获得的能力，不能在项目介绍中表述为已经完成。
 
 ## 当前持久化实现
 
-根据 ADR-0001，下一阶段仍保持模块化单体，只增加 MySQL Store：
+当前通过 Store 接口同时保留内存测试实现与 MySQL 运行实现：
 
 ```text
 TaskStore interface           EventStore interface
@@ -222,8 +231,8 @@ BEGIN
 
 - Redis Streams：MySQL 队列基线完成，并测得轮询/锁竞争问题或需要独立消费组后再决策。
 - Prometheus Server/Grafana：在 `/metrics` 基线稳定后接入，观测积压、等待时间、吞吐、错误和重试。
-- Docker Compose：MySQL/Redis/Prometheus 等多组件出现时，用于可重复开发与测试环境。
-- Kubernetes：API/Worker 已拆分、持久化和崩溃恢复完成后，用 Pod Kill 实验验证多副本行为。
+- Docker Compose：当前已用于 MySQL + TaskPulse + 外部 Worker，以及跨项目 MemoBridge 联调。
+- Kubernetes：当前已有 API/Worker Deployment、Service、ConfigMap 与 Secret 清单；仍需保留 Pod Kill 实验的 TaskEvent 证据。
 
 ## 文档同步要求
 

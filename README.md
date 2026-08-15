@@ -1,353 +1,178 @@
 # TaskPulse
 
-TaskPulse 是一个基于 Go 开发的可靠异步任务执行系统。
+TaskPulse 是一个使用 Go 构建的**可靠异步任务执行运行时**，面向 LLM 调用、内容处理、批量采集等“执行时间长、依赖外部服务、可能失败”的任务。
 
-这个项目用于学习和解决长耗时、批量任务背后的后端工程问题：
+它不是消息队列的替代品，也不是 Agent 编排平台。TaskPulse 解决的是任务从创建到终态之间的可靠生命周期：持久化、领取、租约、重试、恢复、进度、幂等协议和可观测性。
 
-- 有界并发
-- 任务状态机
-- 超时与取消
-- 重试与幂等
-- 进程崩溃后的任务恢复
-- 任务进度追踪
-- 可观测性与性能分析
+## 为什么需要它
 
-TaskPulse 第一阶段不会把自己包装成万能工作流平台。我们先通过真实任务验证系统，再根据实际遇到的问题抽象通用基础设施能力。
-
-项目的正式问题定义、边界和完成标准见：
-
-- [文档索引](docs/README.md)
-- [TaskPulse 项目章程](docs/PROJECT_CHARTER.md)
-- [最小可行版本计划](docs/MVP.md)
-- [系统架构](docs/ARCHITECTURE.md)
-- [学习路径](docs/STUDY_PATH.md)
-
-## 第一个真实场景：URL Inspector
-
-TaskPulse 的第一个上层应用是“批量 URL 检测与网页元数据采集”。
-
-用户提交一批 URL，系统执行：
+同步 HTTP 请求不适合直接承载耗时且不稳定的外部工作：
 
 ```text
-创建批次任务
-→ 拆分为多个 URL 子任务
-→ Worker 并发访问 URL
-→ 记录状态码、响应时间、重定向、网页标题和错误
-→ 对临时错误进行重试
-→ 持续更新任务进度
-→ 保存最终检测报告
+用户发起 LLM 分析
+→ 模型调用可能耗时、限流或超时
+→ Worker 进程可能崩溃
+→ 用户仍需要查看状态，且成功结果不能被重复覆盖
 ```
 
-这个场景会自然产生 TaskPulse 需要解决的问题：
+TaskPulse 将“可靠执行”从业务代码中抽出。上层业务保留领域数据和业务决策；TaskPulse 只保存任务引用并管理执行生命周期。
 
-- 每个网络请求的耗时不可预测
-- 部分请求可能超时
-- 有些错误可以重试，有些错误不能重试
-- 必须限制并发数量，避免耗尽资源
-- 单个 URL 失败不能导致整个批次失败
-- 用户需要查看批次进度和每个 URL 的结果
-- Worker 中断后，未完成任务需要恢复
+## 第一个真实负载：MemoBridge SemanticProfile
 
-## 项目边界
-
-项目包含两层：
+MemoBridge 为每个 SourceItem 创建一个独立的 `memobridge.semantic_profile` 任务：
 
 ```text
-TaskPulse Core
-  负责任务生命周期、存储、排队、Worker、重试、租约、事件和监控
-
-URL Inspector
-  负责 URL 校验、HTTP 请求、网页元数据提取和结果展示
-
-LLM Analysis
-  负责笔记分析输入校验、调用可替换 LLM Client、输出结构化分析结果
+MemoBridge API
+  │ 创建任务：source_item_id + content_hash + prompt_version
+  ▼
+TaskPulse API + MySQL
+  │ 持久化、幂等、Claim、Lease、Retry、Event
+  ▼
+MemoBridge Worker（使用 TaskPulse Worker Runtime）
+  │ 读取资料、重新校验 hash、调用 LLM、幂等 Upsert SemanticProfile
+  ▼
+MemoBridge PostgreSQL
+  │
+  └── Complete(result_ref)
 ```
 
-URL Inspector 用于证明 TaskPulse Core 能处理网络批处理问题。LLM Analysis 用于证明同一套 Core 能承载受限流、长耗时和成本敏感的智能任务。
+边界明确：
 
-TaskPulse Core 中不能出现 URL 特有的业务规则。
+- TaskPulse **不访问** MemoBridge 数据库；
+- TaskPulse 不保存资料正文、完整 Prompt 或完整 LLM 输出；
+- MemoBridge 不实现自己的队列、租约、心跳或重试；
+- MemoBridge 使用 `source_item_id + content_hash + prompt_version` 保证业务写回幂等。
 
-MemoBridge 不是 TaskPulse 第一版的依赖。未来 MemoBridge 真正出现批量链接检测、大型导出或 LLM 批处理需求时，再考虑接入。
+## 当前能力
+
+- MySQL 持久化 `Task` 和 `TaskEvent`；
+- `workflow + idempotency_key` 联合幂等创建；
+- MySQL `FOR UPDATE SKIP LOCKED` 并发 Claim；
+- Lease、Heartbeat、lease token 和 version fencing；
+- 指数退避重试、重试预算与 Lease 过期恢复；
+- 取消、进度上报、事件审计、幂等 Complete/Fail；
+- 单次执行时限，以及 SIGTERM 下主动 Release Lease 的优雅交接；
+- 可复用 Go Client：`pkg/taskpulse`；
+- 可复用 Worker Runtime：`pkg/taskpulseworker`；
+- Prometheus `/metrics` 与结构化日志；
+- 内置中英文运维控制台，支持任务状态、Workflow 筛选、游标分页和事件诊断；
+- Docker Compose、Kubernetes 清单与故障/基准实验手册。
+
+## 从这里开始
+
+| 目标 | 文档 |
+|---|---|
+| 10 分钟启动并创建第一个任务 | [快速开始](docs/GETTING_STARTED.md) |
+| 查看真实 HTTP 与 Worker 契约 | [API 与 Worker 协议](docs/API_REFERENCE.md) |
+| 使用 Docker Compose 或 Kubernetes | [部署手册](docs/DEPLOYMENT.md) |
+| 接入自己的 Go Worker | [Worker SDK 接入](docs/integrations/taskpulse-sdk-adoption.md) |
+| 复现演示与故障证据 | [演示与证据指南](docs/DEMO_AND_EVIDENCE.md) |
+
+最短体验路径：
+
+```powershell
+docker compose up -d --build
+Start-Process http://127.0.0.1:8085/dashboard
+```
+
+然后按照[快速开始](docs/GETTING_STARTED.md)创建 `llm_analysis` 示例任务。
+
+## 一致性语义
+
+TaskPulse 追求的是：
+
+```text
+持久任务状态
++ 单个有效 Lease
++ 至少一次执行尝试
++ 业务侧幂等写回
+```
+
+它不声称外部 LLM 调用“绝对只发生一次”。例如 SemanticProfile 已写入、但 Worker 在 `Complete` 响应返回前崩溃时，TaskPulse 可能重新派发任务；MemoBridge 的幂等 Upsert 保证不会产生错误覆盖。这是外部副作用场景中可证明且诚实的边界。
 
 ## 本地运行
 
-真实运行默认使用 MySQL。`compose.yaml` 第一次创建数据卷时会自动执行初始化迁移。
+### TaskPulse + MySQL + 示例 Worker
 
 ```powershell
 docker compose up -d
+docker compose ps
 ```
 
-应用直接读取进程环境变量，不会自动加载 `.env.example`。启动前需要在当前 PowerShell 设置 `MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` 等变量，然后运行：
+Compose 会为 TaskPulse 和示例 Worker 注入同一个开发用 `TASKPULSE_WORKER_AUTH_TOKEN`。部署到共享环境前必须通过环境变量覆盖默认值；直接启动 `cmd/taskpulse` 时也必须设置该变量。只有显式设置 `TASKPULSE_INSECURE_ALLOW_UNAUTHENTICATED_WORKERS=true` 的隔离本地环境才允许不鉴权。
 
-```powershell
-$env:TASKPULSE_STORAGE="mysql"
-go run ./cmd/taskpulse
-```
-
-服务启动日志必须出现：
+默认宿主机地址：
 
 ```text
-TaskPulse storage backend: mysql
-TaskPulse HTTP server listening on :8080
+TaskPulse: http://127.0.0.1:8085
+MySQL:     127.0.0.1:3306
 ```
 
-默认启动 1 个任务级 Worker。需要验证任务级并发时，可以设置：
+Compose 默认只绑定宿主机回环地址。Dashboard、List/Get/Create/Cancel、`/task-stats` 和 `/metrics` 当前没有控制面鉴权；局域网暴露前必须先完成权限与审计设计，详见 [控制面安全边界](docs/CONTROL_PLANE_SECURITY.md)。
+
+示例 Worker 使用 fake LLM，不会调用真实模型。可用下面命令查看指标：
 
 ```powershell
-$env:TASKPULSE_WORKER_COUNT="4"
+Invoke-RestMethod http://127.0.0.1:8085/metrics
 ```
 
-每个 Worker 使用独立的 `worker_id`，共享 MySQL 任务队列；任务领取由事务和
-`FOR UPDATE SKIP LOCKED` 保证，不会因为启动多个 Worker 就重复有效领取同一个任务。
-
-多进程实验时，可以为不同进程设置不同的 HTTP 地址，例如 `:8080` 和 `:8081`；两个进程仍然连接同一个 MySQL 任务队列。
-
-只有单元测试或不需要持久化的临时调试才显式使用：
-
-```powershell
-$env:TASKPULSE_STORAGE="memory"
-go run ./cmd/taskpulse
-```
-
-MySQL 连接失败时应用直接退出，不会静默退回内存存储。
-
-## 当前 HTTP API
+运维控制台：
 
 ```text
-POST /tasks
-GET  /tasks/{task_id}
-GET  /tasks/{task_id}/events
-POST /tasks/{task_id}/cancel
-GET  /metrics
+http://127.0.0.1:8085/dashboard
 ```
 
-外部 Worker 协议：
+任务列表 API：`GET /tasks?status=failed&workflow=llm_analysis&limit=25`。
+响应使用不透明的 `next_cursor` 继续翻页，列表只返回任务摘要；完整输入和结果仅通过任务详情接口按 ID 查询。
 
-```text
-POST /worker/tasks/claim
-POST /worker/tasks/{task_id}/heartbeat
-POST /worker/tasks/{task_id}/complete
-POST /worker/tasks/{task_id}/fail
-```
+### MemoBridge 跨项目联调
 
-领取任务：
-
-```json
-{
-  "worker_id": "memobridge-worker-1",
-  "lease_duration": "30s"
-}
-```
-
-完成任务时必须携带领取响应中的 `version`：
-
-```json
-{
-  "worker_id": "memobridge-worker-1",
-  "version": 1,
-  "output": {
-    "summary": "..."
-  }
-}
-```
-
-`version` 用于阻止旧 Worker 在任务被恢复、取消或被其他 Worker 接管后覆盖结果。
-第一版外部 Worker 的失败接口直接记录最终失败；统一的外部重试协议将在本协议稳定后补充。
-
-取消接口接受 `queued`、`retrying` 和 `running` 任务。重复取消是幂等操作。
-运行中的任务会先被原子标记为 `canceled` 并清除租约，Worker 通过续租失败取消
-Executor Context；旧 Worker 不能再提交成功结果。
-
-## LLM Analysis 演示
-
-`llm_analysis` 当前使用 Fake LLM Client，不会调用真实模型。它用于验证 TaskPulse 的
-workflow 注册、Worker 执行、结果持久化和事件链路。
-
-创建任务：
+`E:\CS\TaskPulse` 与 `E:\CS\memobridge` 需为同级目录：
 
 ```powershell
-$body = @{
-  workflow = "llm_analysis"
-  input = @{
-    subject = "Go concurrency"
-    notes = @("goroutine", "channel", "context")
-    goal = "make a two week study plan"
-  }
-  max_retries = 3
-} | ConvertTo-Json -Depth 5
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://localhost:8080/tasks `
-  -ContentType "application/json" `
-  -Body $body
+docker compose -f compose.integration.yaml build
+docker compose -f compose.integration.yaml up -d
+.\scripts\smoke-memobridge-integration.ps1
 ```
 
-返回结果中的 `id` 是后续查询使用的 `task_id`。
+详细步骤、端口说明和 Worker 崩溃恢复实验见 [Compose 联调手册](docs/integrations/docker-compose-integration-runbook.md)。
 
-查询任务：
+## 验证与基准
+
+代码验证：
 
 ```powershell
-Invoke-RestMethod -Method Get -Uri http://localhost:8080/tasks/{task_id}
+go test ./...
+.\scripts\verify-taskpulse.ps1
 ```
 
-查询事件：
+最终运行时验收分为四组：
 
-```powershell
-Invoke-RestMethod -Method Get -Uri http://localhost:8080/tasks/{task_id}/events
-```
+1. Compose 下的 MemoBridge 真实任务闭环；
+2. Worker 容器的优雅停机与主动 Lease 交接；
+3. Worker 容器/POD 崩溃后的 Lease 恢复；
+4. MySQL 轮询调度基准与 MySQL 快照。
 
-期望看到：
+完整通过条件见 [最终验收清单](docs/ACCEPTANCE_CHECKLIST.md)。基准命令与 Redis 判定方法见 [MySQL 调度基准手册](docs/experiments/15-dispatch-benchmark-runbook.md)。
 
-```text
-task.status = succeeded
-task.result.subject = Go concurrency
-task.result.model = fake-llm
-events = task_created → task_started → task_succeeded
-```
+## Redis 决策
 
-如果任务长时间停留在 `queued`，优先检查应用启动日志中是否有 Worker 错误，以及当前
-`TASKPULSE_STORAGE` 对应的存储是否已经初始化。
+当前**没有引入 Redis**。这是有意的工程决策：先测量 MySQL Claim 路径的 p95/p99 队列等待、空 Claim 比例、连接/锁等待和吞吐。
 
-模拟一次 LLM 限流后成功：
+只有数据证明 MySQL 轮询或任务发现是瓶颈时，才会使用 MySQL Outbox + Redis Streams 作为 `task_id` 通知层；MySQL 仍然是任务状态、Lease 和恢复的事实源。若瓶颈是 LLM Provider 或业务执行时间，则 Redis 不能解决问题，也不会被加入。
 
-```powershell
-$env:TASKPULSE_LLM_FAKE_FAILURE="rate_limited_once"
-go run ./cmd/taskpulse
-```
+## 文档入口
 
-再次提交上面的 `llm_analysis` 请求后，期望事件序列变为：
-
-```text
-task_created
-task_started
-task_retrying
-task_retry_started
-task_succeeded
-```
-
-这个模拟只属于 Fake Client，用来验证 TaskPulse 的通用重试链路。真实模型接入后，
-限流和上游故障应由真实 Provider Client 根据 HTTP 状态码和超时错误映射。
-
-## 独立 LLM Worker 演示
-
-TaskPulse 也提供一个独立的外部 Worker 示例。启动 TaskPulse API 和 MySQL 时先关闭内部 Worker：
-
-```powershell
-$env:TASKPULSE_INTERNAL_WORKERS_ENABLED="false"
-go run ./cmd/taskpulse
-```
-
-再在另一个终端运行：
-
-```powershell
-$env:TASKPULSE_URL="http://localhost:8080"
-$env:TASKPULSE_EXTERNAL_WORKER_ID="external-llm-worker-1"
-$env:TASKPULSE_EXTERNAL_LEASE="30s"
-$env:TASKPULSE_LLM_FAKE_DELAY="3s"
-go run ./cmd/llm-worker
-```
-
-随后通过 `POST /tasks` 创建 `llm_analysis` 任务。独立 Worker 会通过 HTTP 领取任务、续租、执行 Fake LLM 并提交结果。TaskPulse 进程不直接执行这个任务。
-
-## Worker 崩溃恢复演示
-
-为了稳定复现长任务和租约恢复，可以设置：
-
-```powershell
-$env:TASKPULSE_LLM_FAKE_DELAY="10s"
-$env:TASKPULSE_WORKER_LEASE_DURATION="5s"
-```
-
-启动第一个进程、提交 `llm_analysis` 任务，并在任务处于 `running` 时终止进程。
-租约到期后启动第二个进程，任务应被重新领取并最终完成。完整步骤见
-`docs/experiments/06-worker-crash-recovery.md`。
-
-## 可观测性
-
-TaskPulse 使用结构化文本日志记录 Worker 和 Reaper 的关键动作。常见日志事件：
-
-```text
-task claimed                  INFO
-task succeeded                INFO
-task partially succeeded      WARN
-task failed                   ERROR
-task scheduled for retry      WARN
-task lease renewed            DEBUG
-task lease renewal failed     WARN
-expired task failed by reaper WARN
-```
-
-本地终端使用彩色人类可读格式：成功为绿色，警告为黄色，错误为红色。日志仍然保留
-`task_id`、`workflow`、`worker_id` 等结构化字段，便于后续被日志系统采集。
-
-关键字段包括：
-
-```text
-task_id
-workflow
-worker_id
-status
-retry_count
-duration_ms
-error_code
-available_at
-```
-
-Prometheus 文本格式指标通过 `/metrics` 暴露：
-
-```powershell
-Invoke-RestMethod -Method Get -Uri http://localhost:8080/metrics
-```
-
-当前指标：
-
-```text
-taskpulse_tasks_claimed_total{workflow}
-taskpulse_tasks_completed_total{workflow,status}
-taskpulse_tasks_retried_total{workflow,error_code}
-taskpulse_lease_renewed_total{workflow}
-taskpulse_lease_lost_total{workflow}
-taskpulse_reaper_expired_failures_total{workflow}
-taskpulse_tasks_current{status}
-taskpulse_tasks_available_current{status}
-taskpulse_oldest_available_task_age_seconds{status}
-taskpulse_task_execution_duration_seconds_bucket{workflow,le}
-taskpulse_task_execution_duration_seconds_sum{workflow}
-taskpulse_task_execution_duration_seconds_count{workflow}
-```
-
-这些指标用于回答：
-
-```text
-任务有没有被领取？
-任务最终成功、失败、部分成功分别有多少？
-哪些错误触发了重试？
-当前各状态任务堆积了多少？
-有多少 queued/retrying 任务已经可领取？
-最老的可领取任务等待了多久？
-租约是否正常续期？
-是否出现 Worker 丢失租约？
-任务执行耗时分布如何？
-```
-
-## 开发演进路线
-
-```text
-内存存储和内存队列
-→ MySQL 8 持久化
-→ 使用 FOR UPDATE SKIP LOCKED 实现 MySQL 任务领取
-→ 加入租约和崩溃恢复
-→ 加入指标、故障测试和压力测试
-→ 根据测试结果判断是否需要 Redis Stream
-```
-
-## 第一版不做什么
-
-- 可视化工作流编辑器
-- 动态工作流 DSL
-- 多 Agent 协作
-- 插件市场
-- 为展示技术而强行加入 Kafka
-- 在单机系统尚未测量前引入 Kubernetes
-- 强行接入 MemoBridge
+- [快速开始](docs/GETTING_STARTED.md)
+- [API 与 Worker 协议](docs/API_REFERENCE.md)
+- [部署手册](docs/DEPLOYMENT.md)
+- [演示与证据指南](docs/DEMO_AND_EVIDENCE.md)
+- [项目最终蓝图](docs/PROJECT_BLUEPRINT.md)
+- [当前状态与待验证证据](docs/PROJECT_STATUS.md)
+- [系统架构](docs/ARCHITECTURE.md)
+- [MemoBridge 接入协议](docs/integrations/memobridge-semantic-profile.md)
+- [MemoBridge 接入待办](docs/integrations/memobridge-known-issues.md)
+- [控制面安全边界](docs/CONTROL_PLANE_SECURITY.md)
+- [最终验收清单](docs/ACCEPTANCE_CHECKLIST.md)
+- [实验与压测文档](docs/experiments/README.md)
+- [面试讲解提纲](docs/INTERVIEW_GUIDE.md)
