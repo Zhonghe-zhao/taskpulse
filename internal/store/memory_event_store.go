@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
 )
 
 type MemoryEventStore struct {

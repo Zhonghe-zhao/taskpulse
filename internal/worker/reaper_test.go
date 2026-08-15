@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	"github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 func TestReaperFailsExpiredTaskAfterRetryBudgetExhausted(t *testing.T) {

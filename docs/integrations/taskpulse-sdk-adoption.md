@@ -24,7 +24,7 @@ MemoBridge 只保留 SemanticProfile 业务 Executor。
 在 MemoBridge 的 `go.mod` 中临时添加：
 
 ```go
-replace github.com/zhaozhonghe/taskpulse => ../TaskPulse
+replace github.com/Zhonghe-zhao/taskpulse => ../TaskPulse
 ```
 
 实际相对路径以本机目录为准。生产环境应使用发布的版本号，不应依赖 `replace`。

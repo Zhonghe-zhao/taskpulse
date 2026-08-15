@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
 )
 
 func TestMemoryEventStoreAppendAndListByTaskID(t *testing.T) {

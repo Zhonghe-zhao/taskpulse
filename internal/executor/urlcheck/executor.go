@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	"github.com/zhaozhonghe/taskpulse/internal/worker"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/worker"
 )
 
 const (

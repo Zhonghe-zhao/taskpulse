@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	platformdb "github.com/zhaozhonghe/taskpulse/internal/platform/database"
-	storeerrors "github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	platformdb "github.com/Zhonghe-zhao/taskpulse/internal/platform/database"
+	storeerrors "github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 func TestMySQLTaskTransitionStoreCommitsTaskAndEventIntegration(t *testing.T) {

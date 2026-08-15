@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/pkg/taskpulse"
+	"github.com/Zhonghe-zhao/taskpulse/pkg/taskpulse"
 )
 
 type config struct {

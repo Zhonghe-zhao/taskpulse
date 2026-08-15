@@ -14,14 +14,14 @@ import (
 	"time"
 
 	charmLog "github.com/charmbracelet/log"
-	"github.com/zhaozhonghe/taskpulse/internal/application"
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	"github.com/zhaozhonghe/taskpulse/internal/executor/llmanalysis"
-	"github.com/zhaozhonghe/taskpulse/internal/executor/urlcheck"
-	"github.com/zhaozhonghe/taskpulse/internal/observability"
-	"github.com/zhaozhonghe/taskpulse/internal/store"
-	httptransport "github.com/zhaozhonghe/taskpulse/internal/transport/http"
-	"github.com/zhaozhonghe/taskpulse/internal/worker"
+	"github.com/Zhonghe-zhao/taskpulse/internal/application"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/executor/llmanalysis"
+	"github.com/Zhonghe-zhao/taskpulse/internal/executor/urlcheck"
+	"github.com/Zhonghe-zhao/taskpulse/internal/observability"
+	"github.com/Zhonghe-zhao/taskpulse/internal/store"
+	httptransport "github.com/Zhonghe-zhao/taskpulse/internal/transport/http"
+	"github.com/Zhonghe-zhao/taskpulse/internal/worker"
 )
 
 func main() {

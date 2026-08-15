@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 func TestOpenRuntimeStoresUsesMemoryWhenExplicitlyConfigured(t *testing.T) {

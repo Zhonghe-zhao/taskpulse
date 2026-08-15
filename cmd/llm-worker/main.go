@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	"github.com/zhaozhonghe/taskpulse/internal/executor/llmanalysis"
-	"github.com/zhaozhonghe/taskpulse/internal/worker"
-	"github.com/zhaozhonghe/taskpulse/pkg/taskpulse"
-	"github.com/zhaozhonghe/taskpulse/pkg/taskpulseworker"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/executor/llmanalysis"
+	"github.com/Zhonghe-zhao/taskpulse/internal/worker"
+	"github.com/Zhonghe-zhao/taskpulse/pkg/taskpulse"
+	"github.com/Zhonghe-zhao/taskpulse/pkg/taskpulseworker"
 )
 
 type config struct {

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	storeerrors "github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	storeerrors "github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 const getTaskForUpdateQuery = getTaskQuery + "\nFOR UPDATE"

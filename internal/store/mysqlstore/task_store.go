@@ -11,8 +11,8 @@ import (
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	storeerrors "github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	storeerrors "github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 const insertTaskQuery = `

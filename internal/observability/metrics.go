@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	"github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 var defaultDurationBuckets = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}

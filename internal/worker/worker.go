@@ -9,9 +9,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	"github.com/zhaozhonghe/taskpulse/internal/identity"
-	"github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/identity"
+	"github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 type ExecutionOutcome string

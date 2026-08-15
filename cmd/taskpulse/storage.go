@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/zhaozhonghe/taskpulse/internal/platform/database"
-	"github.com/zhaozhonghe/taskpulse/internal/store"
-	"github.com/zhaozhonghe/taskpulse/internal/store/mysqlstore"
+	"github.com/Zhonghe-zhao/taskpulse/internal/platform/database"
+	"github.com/Zhonghe-zhao/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/store/mysqlstore"
 )
 
 const (

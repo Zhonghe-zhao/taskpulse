@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	storeerrors "github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	storeerrors "github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 var _ storeerrors.TaskQueryStore = (*MySQLTaskStore)(nil)

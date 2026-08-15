@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/pkg/taskpulse"
+	"github.com/Zhonghe-zhao/taskpulse/pkg/taskpulse"
 )
 
 type testExecutor struct {

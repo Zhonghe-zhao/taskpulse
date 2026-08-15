@@ -16,15 +16,15 @@ already provides:
 1. Add a local development dependency in `E:\CS\memobridge\go.mod`:
 
    ```go
-   replace github.com/zhaozhonghe/taskpulse => ../TaskPulse
+   replace github.com/Zhonghe-zhao/taskpulse => ../TaskPulse
    ```
 
 2. Replace the handwritten `internal/taskpulse` HTTP protocol and the manual
    `SemanticProfileWorkerLoop` with:
 
    ```go
-   github.com/zhaozhonghe/taskpulse/pkg/taskpulse
-   github.com/zhaozhonghe/taskpulse/pkg/taskpulseworker
+   github.com/Zhonghe-zhao/taskpulse/pkg/taskpulse
+   github.com/Zhonghe-zhao/taskpulse/pkg/taskpulseworker
    ```
 
 3. Keep the existing SemanticProfile business executor. It must still own:

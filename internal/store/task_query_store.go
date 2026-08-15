@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
 )
 
 var ErrInvalidTaskQuery = errors.New("invalid task query")

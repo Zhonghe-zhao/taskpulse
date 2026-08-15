@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/zhaozhonghe/taskpulse/internal/domain"
-	storeerrors "github.com/zhaozhonghe/taskpulse/internal/store"
+	"github.com/Zhonghe-zhao/taskpulse/internal/domain"
+	storeerrors "github.com/Zhonghe-zhao/taskpulse/internal/store"
 )
 
 type MySQLTaskCreationStore struct {
